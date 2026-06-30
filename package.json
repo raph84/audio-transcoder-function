@@ -1,0 +1,26 @@
+{
+	"name": "audio-transcoder-function",
+	"version": "1.0.0",
+	"description": "",
+	"main": "index.js",
+	"scripts": {
+		"format": "biome format --write .",
+		"lint": "biome lint .",
+		"check": "biome check --write .",
+		"test": "echo \"Error: no test specified\" && exit 1",
+		"prepare": "husky"
+	},
+	"keywords": [],
+	"author": "raph.berube@gmail.com",
+	"license": "Apache-2.0",
+	"packageManager": "pnpm@10.32.1",
+	"lint-staged": {
+		"*": "biome check --write --no-errors-on-unmatched"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.1",
+		"husky": "^9.1.7",
+		"lint-staged": "^17.0.8",
+		"vitest": "^4.1.9"
+	}
+}
