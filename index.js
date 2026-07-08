@@ -7,6 +7,7 @@ import {
 	OUTPUT_PREFIX,
 	SOURCE_PREFIX,
 } from "./src/config.js";
+import { prepareInputSource } from "./src/inputSource.js";
 import { probeAudio } from "./src/probe.js";
 import { transcodeToFlac } from "./src/transcode.js";
 
@@ -54,68 +55,85 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	);
 
 	const sourceFile = storage.bucket(bucket).file(name);
-	const probeReadStream = sourceFile.createReadStream();
+	const { fastStart, openProbeInput, openTranscodeInput, cleanup } =
+		await prepareInputSource(sourceFile);
 
-	let audioProps;
-	try {
-		audioProps = await probeAudio(probeReadStream);
-	} catch (err) {
-		console.error(
-			JSON.stringify({ msg: "probe failed", name, error: err.message }),
-		);
-		throw err;
-	} finally {
-		probeReadStream.destroy?.();
-	}
-
-	if (!Number.isFinite(audioProps.sampleRate) || audioProps.sampleRate <= 0) {
-		throw new Error(
-			`probe returned invalid sampleRate: ${audioProps.sampleRate}`,
-		);
-	}
-
-	console.log(
-		JSON.stringify({
-			msg: "probe complete",
-			codec: audioProps.codec,
-			sampleRate: audioProps.sampleRate,
-			channels: audioProps.channels,
-		}),
-	);
-
-	const transcodeReadStream = sourceFile.createReadStream();
-
-	const gcsWriteStream = storage
-		.bucket(outputBucketName)
-		.file(outputName)
-		.createWriteStream({
-			resumable: false,
-			metadata: { contentType: "audio/flac" },
-		});
-
-	try {
-		await transcodeToFlac(transcodeReadStream, gcsWriteStream, audioProps);
-	} catch (err) {
-		const isPermanent = err.message?.includes("moov atom not found");
-		console.error(
+	if (fastStart !== true) {
+		console.log(
 			JSON.stringify({
-				msg: isPermanent
-					? "transcode failed: non-faststart M4A, skipping"
-					: "transcode failed",
-				sourceFile: name,
-				outputFile: outputName,
-				error: err.message,
+				msg: "non-faststart M4A (or inconclusive check): using local temp file",
+				name,
+				fastStart,
 			}),
 		);
-		if (!isPermanent) throw err;
-		return;
 	}
 
-	console.log(
-		JSON.stringify({
-			msg: "transcode complete",
-			outputBucket: outputBucketName,
-			outputFile: outputName,
-		}),
-	);
+	try {
+		const probeInput = openProbeInput();
+
+		let audioProps;
+		try {
+			audioProps = await probeAudio(probeInput);
+		} catch (err) {
+			console.error(
+				JSON.stringify({ msg: "probe failed", name, error: err.message }),
+			);
+			throw err;
+		} finally {
+			probeInput.destroy?.();
+		}
+
+		if (!Number.isFinite(audioProps.sampleRate) || audioProps.sampleRate <= 0) {
+			throw new Error(
+				`probe returned invalid sampleRate: ${audioProps.sampleRate}`,
+			);
+		}
+
+		console.log(
+			JSON.stringify({
+				msg: "probe complete",
+				codec: audioProps.codec,
+				sampleRate: audioProps.sampleRate,
+				channels: audioProps.channels,
+			}),
+		);
+
+		const transcodeInput = openTranscodeInput();
+
+		const gcsWriteStream = storage
+			.bucket(outputBucketName)
+			.file(outputName)
+			.createWriteStream({
+				resumable: false,
+				metadata: { contentType: "audio/flac" },
+			});
+
+		try {
+			await transcodeToFlac(transcodeInput, gcsWriteStream, audioProps);
+		} catch (err) {
+			const isPermanent = err.message?.includes("moov atom not found");
+			console.error(
+				JSON.stringify({
+					msg: isPermanent
+						? "transcode failed: non-faststart M4A, skipping"
+						: "transcode failed",
+					sourceFile: name,
+					outputFile: outputName,
+					error: err.message,
+				}),
+			);
+			if (!isPermanent) throw err;
+			return;
+		}
+
+		console.log(
+			JSON.stringify({
+				msg: "transcode complete",
+				outputBucket: outputBucketName,
+				outputFile: outputName,
+			}),
+		);
+	} finally {
+		await cleanup();
+	}
 });
