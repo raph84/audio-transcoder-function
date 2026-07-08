@@ -10,7 +10,7 @@ set -a; source .env; set +a
 
 gcloud functions deploy "$FUNCTION_NAME" \
   --gen2 \
-  --runtime=nodejs20 \
+  --runtime=nodejs24 \
   --region="$REGION" \
   --project="$PROJECT_ID" \
   --source=. \
