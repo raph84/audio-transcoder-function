@@ -20,6 +20,7 @@ vi.mock("@ffprobe-installer/ffprobe", () => ({
 	default: { path: "/mock/ffprobe" },
 }));
 
+import { TransientError } from "./errors.js";
 import { probeAudio } from "./probe.js";
 
 function makeStream() {
@@ -118,5 +119,44 @@ describe("probeAudio", () => {
 		await expect(promise).rejects.toThrow(
 			"ffprobe failed: no such file or directory",
 		);
+	});
+
+	it("rejects with a plain (non-transient) error on ffprobe decode failure", async () => {
+		const promise = probeAudio(makeStream());
+
+		cap.ffprobeCallback(new Error("invalid data found"));
+
+		await expect(promise).rejects.not.toBeInstanceOf(TransientError);
+	});
+
+	it("rejects with a TransientError when the source stream errors", async () => {
+		const stream = makeStream();
+		const promise = probeAudio(stream);
+
+		stream.emit("error", new Error("ECONNRESET"));
+
+		await expect(promise).rejects.toBeInstanceOf(TransientError);
+		await expect(promise).rejects.toThrow(
+			"source read stream error: ECONNRESET",
+		);
+	});
+
+	it("ignores a late ffprobe callback after the stream already errored", async () => {
+		const stream = makeStream();
+		const promise = probeAudio(stream);
+
+		stream.emit("error", new Error("ECONNRESET"));
+		cap.ffprobeCallback(null, {
+			streams: [
+				{
+					codec_type: "audio",
+					codec_name: "aac",
+					sample_rate: "44100",
+					channels: 2,
+				},
+			],
+		});
+
+		await expect(promise).rejects.toBeInstanceOf(TransientError);
 	});
 });

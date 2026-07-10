@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TransientError } from "./src/errors.js";
 
 // All state that is referenced inside vi.mock() factories must be created with
 // vi.hoisted() so it is initialized before the factories run.
@@ -171,30 +172,44 @@ describe("transcodeAudio handler", () => {
 
 	// --- error propagation ---
 
-	it("rethrows probe errors so Eventarc can retry", async () => {
-		mockProbeAudio.mockRejectedValue(new Error("ffprobe failed"));
+	it("rethrows transient probe errors so Eventarc can retry", async () => {
+		mockProbeAudio.mockRejectedValue(
+			new TransientError("source read stream error: ECONNRESET"),
+		);
 
 		await expect(
 			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
-		).rejects.toThrow("ffprobe failed");
+		).rejects.toThrow("ECONNRESET");
 
 		expect(mockTranscodeToFlac).not.toHaveBeenCalled();
 	});
 
-	it("rethrows transcode errors so Eventarc can retry", async () => {
+	it("does not rethrow permanent probe errors, to avoid retrying forever", async () => {
+		mockProbeAudio.mockRejectedValue(new Error("No audio stream found"));
+
+		await expect(
+			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
+		).resolves.toBeUndefined();
+
+		expect(mockTranscodeToFlac).not.toHaveBeenCalled();
+	});
+
+	it("rethrows transient transcode errors so Eventarc can retry", async () => {
 		mockProbeAudio.mockResolvedValue({
 			codec: "aac",
 			sampleRate: 44100,
 			channels: 2,
 		});
-		mockTranscodeToFlac.mockRejectedValue(new Error("encoding failed"));
+		mockTranscodeToFlac.mockRejectedValue(
+			new TransientError("GCS write stream error: upload aborted"),
+		);
 
 		await expect(
 			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
-		).rejects.toThrow("encoding failed");
+		).rejects.toThrow("upload aborted");
 	});
 
-	it("does not rethrow moov-atom errors to prevent Eventarc retry loops", async () => {
+	it("does not rethrow permanent transcode errors (e.g. moov atom, codec failures), to avoid retrying forever", async () => {
 		mockProbeAudio.mockResolvedValue({
 			codec: "aac",
 			sampleRate: 44100,
@@ -207,7 +222,7 @@ describe("transcodeAudio handler", () => {
 		).resolves.toBeUndefined();
 	});
 
-	it("throws when probe returns an invalid sampleRate", async () => {
+	it("does not rethrow when probe returns an invalid sampleRate", async () => {
 		mockProbeAudio.mockResolvedValue({
 			codec: "aac",
 			sampleRate: Number.NaN,
@@ -216,6 +231,8 @@ describe("transcodeAudio handler", () => {
 
 		await expect(
 			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
-		).rejects.toThrow("invalid sampleRate");
+		).resolves.toBeUndefined();
+
+		expect(mockTranscodeToFlac).not.toHaveBeenCalled();
 	});
 });

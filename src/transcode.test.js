@@ -62,6 +62,7 @@ vi.mock("@ffprobe-installer/ffprobe", () => ({
 	default: { path: "/mock/ffprobe" },
 }));
 
+import { TransientError } from "./errors.js";
 import { transcodeToFlac } from "./transcode.js";
 
 function makeInputStream() {
@@ -148,6 +149,25 @@ describe("transcodeToFlac", () => {
 		state.handlers.error(new Error("moov atom not found"), "", "stderr text");
 
 		await expect(promise).rejects.toThrow("ffmpeg error: moov atom not found");
+		await expect(promise).rejects.not.toBeInstanceOf(TransientError);
+	});
+
+	it("rejects with a TransientError when the input stream errors", async () => {
+		const out = makeOutputStream();
+		const promise = transcodeToFlac(makeInputStream(), out, {
+			sampleRate: 44100,
+		});
+
+		// fluent-ffmpeg forwards input stream errors as a command 'error' event
+		// with an `inputStreamError` marker (see lib/processor.js).
+		const wrapped = new Error("Input stream error: ECONNRESET");
+		wrapped.inputStreamError = new Error("ECONNRESET");
+		state.handlers.error(wrapped, "", "");
+
+		await expect(promise).rejects.toBeInstanceOf(TransientError);
+		await expect(promise).rejects.toThrow(
+			"source read stream error: ECONNRESET",
+		);
 	});
 
 	it("includes stderr tail in the rejection message", async () => {
@@ -172,6 +192,7 @@ describe("transcodeToFlac", () => {
 		await expect(promise).rejects.toThrow(
 			"GCS write stream error: upload aborted",
 		);
+		await expect(promise).rejects.toBeInstanceOf(TransientError);
 	});
 
 	it("settles only once when both command error and stream error fire", async () => {

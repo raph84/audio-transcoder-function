@@ -1,3 +1,4 @@
+import { TransientError } from "./errors.js";
 import ffmpeg from "./ffmpeg.js";
 
 /**
@@ -47,13 +48,23 @@ export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
 		});
 
 		command.on("error", (err, _stdout, stderr) => {
+			// fluent-ffmpeg wraps errors from the input stream itself (e.g. a GCS
+			// network error) with an `inputStreamError` marker, distinguishing
+			// them from genuine ffmpeg/codec failures.
+			if (err.inputStreamError) {
+				return settle(
+					new TransientError(
+						`source read stream error: ${err.inputStreamError.message}`,
+					),
+				);
+			}
 			const detail = stderr ? `\nstderr: ${stderr.slice(-500)}` : "";
 			settle(new Error(`ffmpeg error: ${err.message}${detail}`));
 		});
 
 		outputStream.on("finish", () => settle(null));
 		outputStream.on("error", (err) =>
-			settle(new Error(`GCS write stream error: ${err.message}`)),
+			settle(new TransientError(`GCS write stream error: ${err.message}`)),
 		);
 
 		// { end: true } ensures ffmpeg closing stdout triggers outputStream.end(),
