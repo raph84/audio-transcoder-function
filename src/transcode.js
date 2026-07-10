@@ -1,3 +1,4 @@
+import { classifyGcsStreamError, TransientError } from "./errors.js";
 import ffmpeg from "./ffmpeg.js";
 
 /**
@@ -47,13 +48,35 @@ export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
 		});
 
 		command.on("error", (err, _stdout, stderr) => {
+			// fluent-ffmpeg wraps errors from the input/output streams themselves
+			// with `inputStreamError` / `outputStreamError` markers, distinguishing
+			// them from genuine ffmpeg/codec failures. The `outputStreamError`
+			// check is a defense-in-depth backstop: in practice our own
+			// `outputStream.on("error", ...)` listener below is registered before
+			// fluent-ffmpeg attaches its internal one, so it settles first — but
+			// that ordering isn't part of fluent-ffmpeg's documented contract.
+			if (err.inputStreamError) {
+				return settle(
+					new TransientError(
+						`source read stream error: ${err.inputStreamError.message}`,
+					),
+				);
+			}
+			if (err.outputStreamError) {
+				return settle(
+					classifyGcsStreamError(
+						err.outputStreamError,
+						"GCS write stream error",
+					),
+				);
+			}
 			const detail = stderr ? `\nstderr: ${stderr.slice(-500)}` : "";
 			settle(new Error(`ffmpeg error: ${err.message}${detail}`));
 		});
 
 		outputStream.on("finish", () => settle(null));
 		outputStream.on("error", (err) =>
-			settle(new Error(`GCS write stream error: ${err.message}`)),
+			settle(classifyGcsStreamError(err, "GCS write stream error")),
 		);
 
 		// { end: true } ensures ffmpeg closing stdout triggers outputStream.end(),

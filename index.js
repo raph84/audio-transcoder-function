@@ -7,10 +7,23 @@ import {
 	OUTPUT_PREFIX,
 	SOURCE_PREFIX,
 } from "./src/config.js";
+import { isTransientError } from "./src/errors.js";
 import { probeAudio } from "./src/probe.js";
 import { transcodeToFlac } from "./src/transcode.js";
 
 const storage = new Storage();
+
+function handleStageError(err, stage, fields) {
+	const retry = isTransientError(err);
+	console.error(
+		JSON.stringify({
+			msg: `${stage} failed: ${retry ? "transient, will retry" : "skipping"}`,
+			...fields,
+			error: err.message,
+		}),
+	);
+	if (retry) throw err;
+}
 
 cloudEvent("transcodeAudio", async (cloudevent) => {
 	const { bucket, name } = cloudevent.data ?? {};
@@ -60,18 +73,21 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		audioProps = await probeAudio(probeReadStream);
 	} catch (err) {
-		console.error(
-			JSON.stringify({ msg: "probe failed", name, error: err.message }),
-		);
-		throw err;
+		handleStageError(err, "probe", { name });
+		return;
 	} finally {
 		probeReadStream.destroy?.();
 	}
 
 	if (!Number.isFinite(audioProps.sampleRate) || audioProps.sampleRate <= 0) {
-		throw new Error(
-			`probe returned invalid sampleRate: ${audioProps.sampleRate}`,
+		console.error(
+			JSON.stringify({
+				msg: "probe returned invalid sampleRate: skipping",
+				name,
+				sampleRate: audioProps.sampleRate,
+			}),
 		);
+		return;
 	}
 
 	console.log(
@@ -96,18 +112,10 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		await transcodeToFlac(transcodeReadStream, gcsWriteStream, audioProps);
 	} catch (err) {
-		const isPermanent = err.message?.includes("moov atom not found");
-		console.error(
-			JSON.stringify({
-				msg: isPermanent
-					? "transcode failed: non-faststart M4A, skipping"
-					: "transcode failed",
-				sourceFile: name,
-				outputFile: outputName,
-				error: err.message,
-			}),
-		);
-		if (!isPermanent) throw err;
+		handleStageError(err, "transcode", {
+			sourceFile: name,
+			outputFile: outputName,
+		});
 		return;
 	}
 
