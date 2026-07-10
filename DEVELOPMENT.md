@@ -97,6 +97,13 @@ The runtime service account needs read access to the trigger bucket and
 write access to the output bucket (Storage Object Viewer / Object Admin, or
 equivalent custom roles).
 
+The deploy command intentionally omits `--retry`. For 2nd gen (Eventarc-triggered)
+functions, retries are opt-in: without `--retry`, a failed invocation — including
+one that hits the `--timeout` deadline — is logged and the event is dropped
+rather than redelivered. Passing `--retry` would make Eventarc redeliver the
+event with exponential backoff for up to 24 hours, which is undesirable here
+since a timeout is likely to just recur on redelivery.
+
 ## Dependency updates
 
 Dependabot is configured (`.github/dependabot.yml`) to open weekly grouped PRs
