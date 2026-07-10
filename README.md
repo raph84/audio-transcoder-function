@@ -35,8 +35,11 @@ Eventarc to retry the event; everything else is logged and swallowed so a
 file that will never succeed isn't retried forever.
 
 - **Transient (retried):** failures reading from or writing to Cloud
-  Storage — e.g. a dropped connection mid-stream. These are typically
-  infrastructure hiccups that a retry can resolve.
+  Storage — e.g. a dropped connection mid-stream, or a 5xx/429 response.
+  These are typically infrastructure hiccups that a retry can resolve.
+  A GCS write failure with a 4xx status that indicates a persistent
+  problem (bad auth, missing bucket) is treated as permanent instead,
+  since retrying can't fix a misconfiguration.
 - **Permanent (not retried):** anything about the audio conversion process
   itself — ffprobe/ffmpeg decode failures, unsupported codecs, a missing
   audio stream, invalid probed metadata, or the `moov atom not found`

@@ -32,11 +32,17 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
 - `src/config.js` — reads and validates environment variables at import
   time. Throws immediately on an unsupported `OUTPUT_FORMAT`.
 - `src/errors.js` — defines `TransientError` / `isTransientError`, the
-  mechanism used to classify errors as retryable vs. permanent.
-- `src/ffmpeg.js` — wires `fluent-ffmpeg` to the static `ffmpeg`/`ffprobe`
-  binaries bundled via `ffmpeg-static` / `@ffprobe-installer/ffprobe`.
-- `src/probe.js` — streams the source file through `ffprobe` to detect
-  codec, sample rate, and channel count without buffering the file.
+  mechanism used to classify errors as retryable vs. permanent, plus
+  `classifyGcsStreamError` for GCS read/write stream failures specifically
+  (permanent for a 4xx status that indicates a persistent problem like bad
+  auth or a missing bucket, transient otherwise).
+- `src/ffmpeg.js` — wires `fluent-ffmpeg` to the static `ffmpeg` binary
+  bundled via `ffmpeg-static`, used by `src/transcode.js`.
+- `src/probe.js` — spawns `ffprobe` directly (bundled via
+  `@ffprobe-installer/ffprobe`) and streams the source file into its stdin
+  to detect codec, sample rate, and channel count without buffering the
+  file. Spawns directly rather than going through fluent-ffmpeg's
+  `ffprobe()` helper so it holds the process handle — see Gotchas.
 - `src/transcode.js` — streams the source file through `ffmpeg` into a
   writable stream, producing mono FLAC at the original sample rate.
 
@@ -53,8 +59,9 @@ the entry point.
   single JSON object (`{ msg, ...fields }`). Keep new log lines in this
   shape rather than free-form strings.
 - Tests mock `@google-cloud/storage`, `@google-cloud/functions-framework`,
-  and the `ffprobe`/`ffmpeg` calls — they don't touch real GCS or spawn
-  real ffmpeg processes. Keep it that way so `pnpm test` stays fast and
+  `node:child_process` (for `src/probe.js`), and `fluent-ffmpeg` (for
+  `src/transcode.js`) — they don't touch real GCS or spawn real
+  ffprobe/ffmpeg processes. Keep it that way so `pnpm test` stays fast and
   offline.
 - Streaming is a core design constraint: the function never downloads a
   full file to disk or buffers it fully in memory. New code touching
@@ -80,10 +87,17 @@ the entry point.
   the comments in `src/probe.js` and `src/transcode.js`.
 - Only `flac` is currently a supported `OUTPUT_FORMAT`; `src/config.js`
   enforces this at startup.
-- fluent-ffmpeg pipes the GCS read stream into ffmpeg/ffprobe's stdin
-  internally. For the transcode command it forwards input-stream errors
-  as a command `error` event with an `err.inputStreamError` marker (see
+- fluent-ffmpeg pipes the GCS read stream into ffmpeg's stdin internally
+  for the transcode command, and forwards input-stream errors as a command
+  `error` event with an `err.inputStreamError` marker, and output-stream
+  errors with an `err.outputStreamError` marker (see
   `node_modules/fluent-ffmpeg/lib/processor.js`); `src/transcode.js`
-  checks that marker to classify the error as transient. `ffprobe()` does
-  *not* do this forwarding, so `src/probe.js` attaches its own `error`
-  listener to the read stream to catch the same class of failure.
+  checks both to classify the error correctly.
+- `src/probe.js` spawns `ffprobe` itself instead of using fluent-ffmpeg's
+  static `ffprobe()` helper. That helper spawns the process internally and
+  never exposes a handle to it — confirmed by testing that if the GCS read
+  stream errors mid-probe, `.pipe()` does not end the destination on a
+  source `'error'`, so the orphaned ffprobe process would block on stdin
+  forever rather than exiting. Spawning directly lets `src/probe.js` call
+  `.kill()` on that exact failure path. If you touch `src/probe.js`, keep
+  that process handle reachable from the stream-error handler.

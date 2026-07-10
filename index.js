@@ -13,6 +13,18 @@ import { transcodeToFlac } from "./src/transcode.js";
 
 const storage = new Storage();
 
+function handleStageError(err, stage, fields) {
+	const retry = isTransientError(err);
+	console.error(
+		JSON.stringify({
+			msg: `${stage} failed: ${retry ? "transient, will retry" : "skipping"}`,
+			...fields,
+			error: err.message,
+		}),
+	);
+	if (retry) throw err;
+}
+
 cloudEvent("transcodeAudio", async (cloudevent) => {
 	const { bucket, name } = cloudevent.data ?? {};
 
@@ -61,17 +73,7 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		audioProps = await probeAudio(probeReadStream);
 	} catch (err) {
-		const retry = isTransientError(err);
-		console.error(
-			JSON.stringify({
-				msg: retry
-					? "probe failed: transient, will retry"
-					: "probe failed: skipping",
-				name,
-				error: err.message,
-			}),
-		);
-		if (retry) throw err;
+		handleStageError(err, "probe", { name });
 		return;
 	} finally {
 		probeReadStream.destroy?.();
@@ -110,18 +112,10 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		await transcodeToFlac(transcodeReadStream, gcsWriteStream, audioProps);
 	} catch (err) {
-		const retry = isTransientError(err);
-		console.error(
-			JSON.stringify({
-				msg: retry
-					? "transcode failed: transient, will retry"
-					: "transcode failed: skipping",
-				sourceFile: name,
-				outputFile: outputName,
-				error: err.message,
-			}),
-		);
-		if (retry) throw err;
+		handleStageError(err, "transcode", {
+			sourceFile: name,
+			outputFile: outputName,
+		});
 		return;
 	}
 

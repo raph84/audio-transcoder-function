@@ -195,6 +195,43 @@ describe("transcodeToFlac", () => {
 		await expect(promise).rejects.toBeInstanceOf(TransientError);
 	});
 
+	it("rejects with a plain (non-transient) error when the output stream error has a permanent HTTP status", async () => {
+		const out = makeOutputStream();
+		const promise = transcodeToFlac(makeInputStream(), out, {
+			sampleRate: 44100,
+		});
+
+		const permissionErr = new Error("permission denied");
+		permissionErr.status = 403;
+		out.emit("error", permissionErr);
+
+		await expect(promise).rejects.toThrow(
+			"GCS write stream error: permission denied",
+		);
+		await expect(promise).rejects.not.toBeInstanceOf(TransientError);
+	});
+
+	it("classifies err.outputStreamError from the command 'error' event the same way as a direct output stream error", async () => {
+		const out = makeOutputStream();
+		const promise = transcodeToFlac(makeInputStream(), out, {
+			sampleRate: 44100,
+		});
+
+		// fluent-ffmpeg forwards output stream errors as a command 'error' event
+		// with an `outputStreamError` marker (see lib/processor.js), as a
+		// defense-in-depth backstop alongside our own outputStream listener.
+		const permissionErr = new Error("permission denied");
+		permissionErr.status = 403;
+		const wrapped = new Error("Output stream error: permission denied");
+		wrapped.outputStreamError = permissionErr;
+		state.handlers.error(wrapped, "", "");
+
+		await expect(promise).rejects.toThrow(
+			"GCS write stream error: permission denied",
+		);
+		await expect(promise).rejects.not.toBeInstanceOf(TransientError);
+	});
+
 	it("settles only once when both command error and stream error fire", async () => {
 		const out = makeOutputStream();
 		const promise = transcodeToFlac(makeInputStream(), out, {
