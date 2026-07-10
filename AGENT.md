@@ -42,7 +42,8 @@ the entry point.
 
 ## Conventions
 
-- ES modules (`"type": "module"` in `package.json`), Node >= 18.
+- ES modules (`"type": "module"` in `package.json`), Node >= 24 (matches the
+  `nodejs24` Cloud Functions runtime).
 - Formatting/linting is Biome-owned: tabs, double quotes, organized imports.
   Don't hand-format — run `pnpm check` instead of manually matching style.
 - Structured logging: log lines are `console.log`/`console.error` with a

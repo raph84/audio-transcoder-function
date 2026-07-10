@@ -2,7 +2,8 @@
 
 ## Prerequisites
 
-- Node.js >= 18 (a dev container is provided in `.devcontainer/` with Node 24)
+- Node.js >= 24, matching the `nodejs24` Cloud Functions runtime (a dev
+  container with Node 24 is provided in `.devcontainer/`)
 - [pnpm](https://pnpm.io/) — pinned via `packageManager` in `package.json`
   (currently `pnpm@10.32.1`)
 
