@@ -13,8 +13,16 @@ import ffmpeg from "./ffmpeg.js";
  * cannot seek backward in a non-seekable pipe. Most modern recorders (iOS,
  * Android) write faststart M4A by default.
  *
+ * `format.duration` is normally populated from the MP4 `mvhd` atom, which
+ * faststart M4A keeps at the front of the file - same reason codec/sample
+ * rate detection already works over a pipe. It can still come back as "N/A"
+ * or be absent for unusual encoders; `Number("N/A")` is NaN, so this
+ * deliberately resolves to `durationSeconds: null` rather than throwing -
+ * an unknown duration must never fail the whole invocation, it should just
+ * disable the downstream split feature for that file.
+ *
  * @param {import('stream').Readable} readStream
- * @returns {Promise<{ codec: string, sampleRate: number, channels: number }>}
+ * @returns {Promise<{ codec: string, sampleRate: number, channels: number, durationSeconds: number|null }>}
  */
 export function probeAudio(readStream) {
 	return new Promise((resolve, reject) => {
@@ -29,10 +37,15 @@ export function probeAudio(readStream) {
 				return reject(new Error("No audio stream found in source file"));
 			}
 
+			const parsedDuration = Number(data.format?.duration);
+
 			resolve({
 				codec: audioStream.codec_name,
 				sampleRate: Number(audioStream.sample_rate),
 				channels: audioStream.channels,
+				durationSeconds: Number.isFinite(parsedDuration)
+					? parsedDuration
+					: null,
 			});
 		});
 	});

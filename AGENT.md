@@ -33,9 +33,18 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
 - `src/ffmpeg.js` — wires `fluent-ffmpeg` to the static `ffmpeg`/`ffprobe`
   binaries bundled via `ffmpeg-static` / `@ffprobe-installer/ffprobe`.
 - `src/probe.js` — streams the source file through `ffprobe` to detect
-  codec, sample rate, and channel count without buffering the file.
+  codec, sample rate, channel count, and duration without buffering the
+  file.
 - `src/transcode.js` — streams the source file through `ffmpeg` into a
   writable stream, producing mono FLAC at the original sample rate.
+- `src/silence.js` — runs a decode-only `silencedetect` pass to find quiet
+  intervals, and the pure algorithm that picks silence-aware split points
+  near each `SPLIT_AFTER_MINUTES` boundary.
+- `src/split.js` — cuts one FLAC segment via a signed-URL-based ffmpeg seek
+  + stream copy, used only when splitting is enabled.
+- `src/ffmpegPipeline.js` — shared "pipe an ffmpeg command into a writable
+  stream and settle a promise once" helper used by `src/transcode.js`,
+  `src/silence.js`, and `src/split.js`.
 
 Each `src/*.js` module has a co-located `*.test.js`; `index.test.js` covers
 the entry point.
@@ -70,3 +79,23 @@ the entry point.
   the comments in `src/probe.js` and `src/transcode.js`.
 - Only `flac` is currently a supported `OUTPUT_FORMAT`; `src/config.js`
   enforces this at startup.
+- `ffprobe`'s `format.duration` (used for `durationSeconds` in `src/probe.js`)
+  can come back as `"N/A"` or be missing entirely for unusual encoders;
+  this resolves to `durationSeconds: null` rather than throwing, since an
+  unknown duration should only disable the split feature, not fail the
+  whole invocation.
+- `src/split.js` seeks into the already-uploaded FLAC via a signed URL,
+  relying on the bundled `ffmpeg-static` binary supporting the `https`
+  input protocol (`<binary> -protocols | grep https` to verify — confirmed
+  supported as of the `ffmpeg-static@5.3.0` build in use, but re-check if
+  that dependency is ever bumped to a different upstream build).
+- The intermediate full FLAC (from `src/transcode.js`) is written via a
+  non-seekable GCS write stream, so it very likely has no seek table.
+  `src/split.js`'s seeks into it are still correct (ffmpeg's flac demuxer
+  scans for sync codes regardless) but are an O(bytes-before-target) scan,
+  not an O(1) indexed seek — a performance characteristic for later parts
+  of very long recordings, not a correctness bug.
+- Splitting requires the runtime service account to have
+  `roles/iam.serviceAccountTokenCreator` on itself (for `getSignedUrl()`
+  under Application Default Credentials) — see DEVELOPMENT.md. Without it,
+  the full transcode still succeeds but no split parts are ever produced.

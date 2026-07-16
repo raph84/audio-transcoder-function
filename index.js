@@ -5,12 +5,32 @@ import {
 	OUTPUT_BUCKET,
 	OUTPUT_FORMAT,
 	OUTPUT_PREFIX,
+	SILENCE_LOOKBACK_MAX_SECONDS,
+	SILENCE_MIN_DURATION_SECONDS,
+	SILENCE_NOISE_DB,
 	SOURCE_PREFIX,
+	SPLIT_AFTER_MINUTES,
 } from "./src/config.js";
 import { probeAudio } from "./src/probe.js";
+import { computeSplitPoints, detectSilence } from "./src/silence.js";
+import { cutFlacSegment } from "./src/split.js";
 import { transcodeToFlac } from "./src/transcode.js";
 
 const storage = new Storage();
+
+const splitThresholdSeconds =
+	SPLIT_AFTER_MINUTES !== null ? SPLIT_AFTER_MINUTES * 60 : null;
+
+// The signed URL is generated once and reused for every concurrent part
+// cut, so its expiry must cover the whole split phase, not just one part.
+// There's no cheap way to read "time remaining in this invocation" for a
+// CloudEvent-triggered function, so a generous fixed constant is simpler
+// and safer than trying to compute a tight bound.
+const SIGNED_URL_EXPIRY_MS = 30 * 60 * 1000;
+
+function logError(msg, fields) {
+	console.error(JSON.stringify({ msg, ...fields }));
+}
 
 cloudEvent("transcodeAudio", async (cloudevent) => {
 	const { bucket, name } = cloudevent.data ?? {};
@@ -97,15 +117,11 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 		await transcodeToFlac(transcodeReadStream, gcsWriteStream, audioProps);
 	} catch (err) {
 		const isPermanent = err.message?.includes("moov atom not found");
-		console.error(
-			JSON.stringify({
-				msg: isPermanent
-					? "transcode failed: non-faststart M4A, skipping"
-					: "transcode failed",
-				sourceFile: name,
-				outputFile: outputName,
-				error: err.message,
-			}),
+		logError(
+			isPermanent
+				? "transcode failed: non-faststart M4A, skipping"
+				: "transcode failed",
+			{ sourceFile: name, outputFile: outputName, error: err.message },
 		);
 		if (!isPermanent) throw err;
 		return;
@@ -118,4 +134,112 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 			outputFile: outputName,
 		}),
 	);
+
+	if (splitThresholdSeconds === null) return;
+
+	if (audioProps.durationSeconds == null) {
+		console.log(
+			JSON.stringify({
+				msg: "skip split: duration unknown from probe",
+				sourceFile: name,
+			}),
+		);
+		return;
+	}
+
+	if (audioProps.durationSeconds <= splitThresholdSeconds) {
+		console.log(
+			JSON.stringify({
+				msg: "skip split: duration below threshold",
+				durationSeconds: audioProps.durationSeconds,
+				splitThresholdSeconds,
+			}),
+		);
+		return;
+	}
+
+	try {
+		const silenceReadStream = sourceFile.createReadStream();
+		let silenceIntervals;
+		try {
+			silenceIntervals = await detectSilence(silenceReadStream, {
+				noiseDb: SILENCE_NOISE_DB,
+				minDurationSeconds: SILENCE_MIN_DURATION_SECONDS,
+				durationSeconds: audioProps.durationSeconds,
+			});
+		} finally {
+			silenceReadStream.destroy?.();
+		}
+
+		const segments = computeSplitPoints({
+			durationSeconds: audioProps.durationSeconds,
+			splitAfterSeconds: splitThresholdSeconds,
+			silenceIntervals,
+			lookbackMaxSeconds: SILENCE_LOOKBACK_MAX_SECONDS,
+		});
+
+		console.log(
+			JSON.stringify({
+				msg: "split points computed",
+				sourceFile: name,
+				partCount: segments.length,
+				segments,
+			}),
+		);
+
+		const [signedUrl] = await storage
+			.bucket(outputBucketName)
+			.file(outputName)
+			.getSignedUrl({
+				version: "v4",
+				action: "read",
+				expires: Date.now() + SIGNED_URL_EXPIRY_MS,
+			});
+
+		// Parts are independent: each reads its own byte range from the signed
+		// URL and writes to its own output object, so they run concurrently
+		// rather than paying the sum of every part's ffmpeg run in sequence.
+		await Promise.all(
+			segments.map((segment, i) => {
+				const partName = `${OUTPUT_PREFIX}${stem}.part${String(i + 1).padStart(3, "0")}.${OUTPUT_FORMAT}`;
+				const partWriteStream = storage
+					.bucket(outputBucketName)
+					.file(partName)
+					.createWriteStream({
+						resumable: false,
+						metadata: { contentType: "audio/flac" },
+					});
+
+				console.log(
+					JSON.stringify({
+						msg: "cutting part",
+						partName,
+						start: segment.start,
+						end: segment.end,
+					}),
+				);
+
+				return cutFlacSegment(signedUrl, partWriteStream, segment);
+			}),
+		);
+
+		console.log(
+			JSON.stringify({
+				msg: "split complete",
+				sourceFile: name,
+				partCount: segments.length,
+			}),
+		);
+	} catch (err) {
+		// Deliberately swallowed: the primary deliverable (full FLAC) already
+		// succeeded, and rethrowing would make Eventarc redeliver the whole
+		// event, re-running the expensive transcode just to retry what's
+		// often a transient split-phase issue. Mirrors the moov-atom
+		// precedent above.
+		logError("split failed; full transcode already succeeded, not retrying", {
+			sourceFile: name,
+			outputFile: outputName,
+			error: err.message,
+		});
+	}
 });

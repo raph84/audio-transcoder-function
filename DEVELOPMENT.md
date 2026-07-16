@@ -66,8 +66,10 @@ on staged files automatically.
 index.js            Cloud Function entry point (transcodeAudio)
 src/config.js        Environment-variable configuration, validated at import time
 src/ffmpeg.js         fluent-ffmpeg instance wired to the static ffmpeg/ffprobe binaries
-src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels
+src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels/duration
 src/transcode.js      Streams a source file through ffmpeg into a FLAC output stream
+src/silence.js         Silencedetect pass + silence-aware split point selection
+src/split.js           Cuts one FLAC segment out of a signed URL via ffmpeg seek + stream copy
 ```
 
 ## Deploying
@@ -90,12 +92,36 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --memory="$MEMORY" \
   --timeout="$TIMEOUT" \
   --service-account="$SERVICE_ACCOUNT" \
-  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )"
+  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )$( [ -n "$SPLIT_AFTER_MINUTES" ] && echo ",SPLIT_AFTER_MINUTES=$SPLIT_AFTER_MINUTES,SILENCE_NOISE_DB=$SILENCE_NOISE_DB,SILENCE_MIN_DURATION_SECONDS=$SILENCE_MIN_DURATION_SECONDS$( [ -n "$SILENCE_LOOKBACK_MAX_SECONDS" ] && echo ",SILENCE_LOOKBACK_MAX_SECONDS=$SILENCE_LOOKBACK_MAX_SECONDS" ) )"
 ```
 
 The runtime service account needs read access to the trigger bucket and
 write access to the output bucket (Storage Object Viewer / Object Admin, or
 equivalent custom roles).
+
+### Splitting: extra one-time IAM grant
+
+If you set `SPLIT_AFTER_MINUTES`, the function generates a short-lived
+signed URL for the uploaded FLAC (to seek into it for cutting parts). On
+Cloud Functions Gen2 under Application Default Credentials, this requires
+the runtime service account to be able to sign as itself:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project="$PROJECT_ID"
+```
+
+Without this, the full FLAC still uploads normally, but `getSignedUrl()`
+fails and no split parts are ever produced (the failure is caught, logged
+as `"split failed"`, and swallowed — see the README's Error handling
+section).
+
+Also consider raising `TIMEOUT` beyond the default `540s` when splitting is
+enabled for long recordings: the whole invocation (probe + transcode +
+silencedetect + all part uploads, cut concurrently) has to fit inside one
+Cloud Functions Gen2 invocation, which supports up to `3600s`.
 
 ## Dependency updates
 

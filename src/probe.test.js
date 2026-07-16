@@ -31,7 +31,7 @@ describe("probeAudio", () => {
 		cap.ffprobeCallback = null;
 	});
 
-	it("resolves with codec, sampleRate, and channels from the audio stream", async () => {
+	it("resolves with codec, sampleRate, channels, and durationSeconds from the probe data", async () => {
 		const promise = probeAudio(makeStream());
 
 		cap.ffprobeCallback(null, {
@@ -43,12 +43,14 @@ describe("probeAudio", () => {
 					channels: 2,
 				},
 			],
+			format: { duration: "185.023" },
 		});
 
 		await expect(promise).resolves.toEqual({
 			codec: "aac",
 			sampleRate: 44100,
 			channels: 2,
+			durationSeconds: 185.023,
 		});
 	});
 
@@ -118,5 +120,63 @@ describe("probeAudio", () => {
 		await expect(promise).rejects.toThrow(
 			"ffprobe failed: no such file or directory",
 		);
+	});
+
+	// --- durationSeconds ---
+
+	it("resolves durationSeconds: null when format.duration is 'N/A'", async () => {
+		const promise = probeAudio(makeStream());
+
+		cap.ffprobeCallback(null, {
+			streams: [
+				{
+					codec_type: "audio",
+					codec_name: "aac",
+					sample_rate: "44100",
+					channels: 2,
+				},
+			],
+			format: { duration: "N/A" },
+		});
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
+	});
+
+	it("resolves durationSeconds: null when format is missing entirely", async () => {
+		const promise = probeAudio(makeStream());
+
+		cap.ffprobeCallback(null, {
+			streams: [
+				{
+					codec_type: "audio",
+					codec_name: "aac",
+					sample_rate: "44100",
+					channels: 2,
+				},
+			],
+		});
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
+	});
+
+	it("resolves durationSeconds: null when format.duration is missing", async () => {
+		const promise = probeAudio(makeStream());
+
+		cap.ffprobeCallback(null, {
+			streams: [
+				{
+					codec_type: "audio",
+					codec_name: "aac",
+					sample_rate: "44100",
+					channels: 2,
+				},
+			],
+			format: {},
+		});
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
 	});
 });

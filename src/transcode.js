@@ -1,4 +1,5 @@
 import ffmpeg from "./ffmpeg.js";
+import { runFfmpegPipeline } from "./ffmpegPipeline.js";
 
 /**
  * Transcode a readable M4A stream to FLAC, writing directly to a writable stream.
@@ -26,38 +27,22 @@ import ffmpeg from "./ffmpeg.js";
  * @returns {Promise<void>}
  */
 export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
-	return new Promise((resolve, reject) => {
-		let settled = false;
-		function settle(err) {
-			if (settled) return;
-			settled = true;
-			if (err) reject(err);
-			else resolve();
-		}
+	const command = ffmpeg(inputStream)
+		.audioCodec("flac")
+		.audioChannels(1)
+		.audioFrequency(sampleRate)
+		.format("flac")
+		.outputOptions(["-compression_level 8"]);
 
-		const command = ffmpeg(inputStream)
-			.audioCodec("flac")
-			.audioChannels(1)
-			.audioFrequency(sampleRate)
-			.format("flac")
-			.outputOptions(["-compression_level 8"]);
+	command.on("start", (cmdLine) => {
+		console.log(JSON.stringify({ msg: "ffmpeg started", cmd: cmdLine }));
+	});
 
-		command.on("start", (cmdLine) => {
-			console.log(JSON.stringify({ msg: "ffmpeg started", cmd: cmdLine }));
-		});
-
-		command.on("error", (err, _stdout, stderr) => {
-			const detail = stderr ? `\nstderr: ${stderr.slice(-500)}` : "";
-			settle(new Error(`ffmpeg error: ${err.message}${detail}`));
-		});
-
-		outputStream.on("finish", () => settle(null));
-		outputStream.on("error", (err) =>
-			settle(new Error(`GCS write stream error: ${err.message}`)),
-		);
-
-		// { end: true } ensures ffmpeg closing stdout triggers outputStream.end(),
-		// which flushes the GCS upload and eventually emits "finish".
-		command.pipe(outputStream, { end: true });
+	// { end: true } (set inside runFfmpegPipeline) ensures ffmpeg closing stdout
+	// triggers outputStream.end(), which flushes the GCS upload and eventually
+	// emits "finish".
+	return runFfmpegPipeline(command, outputStream, {
+		commandErrorLabel: "ffmpeg",
+		streamErrorLabel: "GCS write stream",
 	});
 }
