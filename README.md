@@ -43,21 +43,35 @@ URL (HTTP range requests), so no local disk or extra memory is used either.
 
 ### Error handling
 
-- Probe and transcode failures are re-thrown, which signals Eventarc to retry
-  the event.
-- The one exception is `moov atom not found`, raised by ffmpeg when it gets a
-  non-faststart M4A (moov atom at the end of the file) on a non-seekable
-  pipe. That's treated as a permanent, non-retryable failure and logged
-  instead of thrown, since retrying can't fix it. Most modern recorders
-  (iOS, Android) write faststart M4A by default.
-- Split-phase failures (silence detection or a part upload failing) are
-  logged (`"split failed"`) and swallowed, never rethrown. By the time the
-  split step runs, the full FLAC has already uploaded successfully;
-  rethrowing would make Eventarc redeliver the whole event and redo the
-  (expensive) full transcode just to retry what's usually a transient
-  split-phase issue. If splitting persistently fails (e.g. a missing IAM
-  grant, see [DEVELOPMENT.md](DEVELOPMENT.md)), it will silently never
-  produce parts — consider a log-based alert on `"split failed"`.
+Only errors classified as **transient** are re-thrown, which signals
+Eventarc to retry the event; everything else is logged and swallowed so a
+file that will never succeed isn't retried forever.
+
+- **Transient (retried):** failures reading from or writing to Cloud
+  Storage — e.g. a dropped connection mid-stream, or a 5xx/429 response.
+  These are typically infrastructure hiccups that a retry can resolve.
+  A GCS write failure with a 4xx status that indicates a persistent
+  problem (bad auth, missing bucket) is treated as permanent instead,
+  since retrying can't fix a misconfiguration.
+- **Permanent (not retried):** anything about the audio conversion process
+  itself — ffprobe/ffmpeg decode failures, unsupported codecs, a missing
+  audio stream, invalid probed metadata, or the `moov atom not found`
+  error raised by ffmpeg when it gets a non-faststart M4A (moov atom at
+  the end of the file) on a non-seekable pipe. Retrying can't fix any of
+  these, since the problem is the file itself, not the environment. Most
+  modern recorders (iOS, Android) write faststart M4A by default.
+- **Split-phase failures** (silence detection or a part upload failing) are
+  always logged (`"split failed"`) and swallowed, never rethrown,
+  regardless of the classification above. By the time the split step runs,
+  the full FLAC has already uploaded successfully; rethrowing would make
+  Eventarc redeliver the whole event and redo the (expensive) full
+  transcode just to retry what's usually a transient split-phase issue. If
+  splitting persistently fails (e.g. a missing IAM grant, see
+  [DEVELOPMENT.md](DEVELOPMENT.md)), it will silently never produce parts —
+  consider a log-based alert on `"split failed"`.
+
+See `src/errors.js` (`TransientError` / `isTransientError`) for the
+classification mechanism.
 
 ### Configuration
 

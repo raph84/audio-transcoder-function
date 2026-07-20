@@ -99,6 +99,13 @@ The runtime service account needs read access to the trigger bucket and
 write access to the output bucket (Storage Object Viewer / Object Admin, or
 equivalent custom roles).
 
+The deploy command intentionally omits `--retry`. For 2nd gen (Eventarc-triggered)
+functions, retries are opt-in: without `--retry`, a failed invocation — including
+one that hits the `--timeout` deadline — is logged and the event is dropped
+rather than redelivered. Passing `--retry` would make Eventarc redeliver the
+event with exponential backoff for up to 24 hours, which is undesirable here
+since a timeout is likely to just recur on redelivery.
+
 ### Splitting: extra one-time IAM grant
 
 If you set `SPLIT_AFTER_MINUTES`, the function generates a short-lived
@@ -118,7 +125,7 @@ fails and no split parts are ever produced (the failure is caught, logged
 as `"split failed"`, and swallowed — see the README's Error handling
 section).
 
-Also consider raising `TIMEOUT` beyond the default `540s` when splitting is
+Also consider raising `TIMEOUT` beyond the default `300s` when splitting is
 enabled for long recordings: the whole invocation (probe + transcode +
 silencedetect + all part uploads, cut concurrently) has to fit inside one
 Cloud Functions Gen2 invocation, which supports up to `3600s`.

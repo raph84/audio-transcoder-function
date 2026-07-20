@@ -11,6 +11,7 @@ import {
 	SOURCE_PREFIX,
 	SPLIT_AFTER_MINUTES,
 } from "./src/config.js";
+import { isTransientError } from "./src/errors.js";
 import { probeAudio } from "./src/probe.js";
 import { computeSplitPoints, detectSilence } from "./src/silence.js";
 import { cutFlacSegment } from "./src/split.js";
@@ -30,6 +31,18 @@ const SIGNED_URL_EXPIRY_MS = 30 * 60 * 1000;
 
 function logError(msg, fields) {
 	console.error(JSON.stringify({ msg, ...fields }));
+}
+
+function handleStageError(err, stage, fields) {
+	const retry = isTransientError(err);
+	console.error(
+		JSON.stringify({
+			msg: `${stage} failed: ${retry ? "transient, will retry" : "skipping"}`,
+			...fields,
+			error: err.message,
+		}),
+	);
+	if (retry) throw err;
 }
 
 cloudEvent("transcodeAudio", async (cloudevent) => {
@@ -80,18 +93,21 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		audioProps = await probeAudio(probeReadStream);
 	} catch (err) {
-		console.error(
-			JSON.stringify({ msg: "probe failed", name, error: err.message }),
-		);
-		throw err;
+		handleStageError(err, "probe", { name });
+		return;
 	} finally {
 		probeReadStream.destroy?.();
 	}
 
 	if (!Number.isFinite(audioProps.sampleRate) || audioProps.sampleRate <= 0) {
-		throw new Error(
-			`probe returned invalid sampleRate: ${audioProps.sampleRate}`,
+		console.error(
+			JSON.stringify({
+				msg: "probe returned invalid sampleRate: skipping",
+				name,
+				sampleRate: audioProps.sampleRate,
+			}),
 		);
+		return;
 	}
 
 	console.log(
@@ -116,14 +132,10 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 	try {
 		await transcodeToFlac(transcodeReadStream, gcsWriteStream, audioProps);
 	} catch (err) {
-		const isPermanent = err.message?.includes("moov atom not found");
-		logError(
-			isPermanent
-				? "transcode failed: non-faststart M4A, skipping"
-				: "transcode failed",
-			{ sourceFile: name, outputFile: outputName, error: err.message },
-		);
-		if (!isPermanent) throw err;
+		handleStageError(err, "transcode", {
+			sourceFile: name,
+			outputFile: outputName,
+		});
 		return;
 	}
 

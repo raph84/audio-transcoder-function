@@ -1,3 +1,4 @@
+import { classifyGcsStreamError } from "./errors.js";
 import ffmpeg from "./ffmpeg.js";
 import { runFfmpegPipeline } from "./ffmpegPipeline.js";
 
@@ -44,5 +45,6 @@ export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
 	return runFfmpegPipeline(command, outputStream, {
 		commandErrorLabel: "ffmpeg",
 		streamErrorLabel: "GCS write stream",
+		classifyStreamError: classifyGcsStreamError,
 	});
 }
