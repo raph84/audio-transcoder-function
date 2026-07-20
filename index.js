@@ -14,20 +14,13 @@ import {
 import { isTransientError } from "./src/errors.js";
 import { probeAudio } from "./src/probe.js";
 import { computeSplitPoints, detectSilence } from "./src/silence.js";
-import { cutFlacSegment } from "./src/split.js";
+import { transcodeFlacSegment } from "./src/split.js";
 import { transcodeToFlac } from "./src/transcode.js";
 
 const storage = new Storage();
 
 const splitThresholdSeconds =
 	SPLIT_AFTER_MINUTES !== null ? SPLIT_AFTER_MINUTES * 60 : null;
-
-// The signed URL is generated once and reused for every concurrent part
-// cut, so its expiry must cover the whole split phase, not just one part.
-// There's no cheap way to read "time remaining in this invocation" for a
-// CloudEvent-triggered function, so a generous fixed constant is simpler
-// and safer than trying to compute a tight bound.
-const SIGNED_URL_EXPIRY_MS = 30 * 60 * 1000;
 
 function logError(msg, fields) {
 	console.error(JSON.stringify({ msg, ...fields }));
@@ -199,21 +192,17 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 			}),
 		);
 
-		const [signedUrl] = await storage
-			.bucket(outputBucketName)
-			.file(outputName)
-			.getSignedUrl({
-				version: "v4",
-				action: "read",
-				expires: Date.now() + SIGNED_URL_EXPIRY_MS,
-			});
-
-		// Parts are independent: each reads its own byte range from the signed
-		// URL and writes to its own output object, so they run concurrently
+		// Parts are independent: each opens its own fresh read of the source
+		// object and writes to its own output object, so they run concurrently
 		// rather than paying the sum of every part's ffmpeg run in sequence.
+		// Each re-decodes the source from byte 0 up through its own cut point
+		// (see split.js for why: ffmpeg's own HTTPS input segfaults in this
+		// environment, and `-ss` on a non-seekable input only seeks correctly
+		// while actually decoding, not under `-c copy`).
 		await Promise.all(
 			segments.map((segment, i) => {
 				const partName = `${OUTPUT_PREFIX}${stem}.part${String(i + 1).padStart(3, "0")}.${OUTPUT_FORMAT}`;
+				const partReadStream = sourceFile.createReadStream();
 				const partWriteStream = storage
 					.bucket(outputBucketName)
 					.file(partName)
@@ -224,14 +213,19 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 
 				console.log(
 					JSON.stringify({
-						msg: "cutting part",
+						msg: "transcoding part",
 						partName,
 						start: segment.start,
 						end: segment.end,
 					}),
 				);
 
-				return cutFlacSegment(signedUrl, partWriteStream, segment);
+				return transcodeFlacSegment(
+					partReadStream,
+					partWriteStream,
+					segment,
+					audioProps,
+				);
 			}),
 		);
 

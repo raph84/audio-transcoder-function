@@ -2,82 +2,73 @@ import ffmpeg from "./ffmpeg.js";
 import { runFfmpegPipeline } from "./ffmpegPipeline.js";
 
 /**
- * Stream-copy one segment of an already-uploaded FLAC file, read via a
- * short-lived signed HTTPS URL (ffmpeg seeks using HTTP range requests), and
- * pipe the result directly into `outputStream` - no local disk.
+ * Transcode one segment of the source audio straight to FLAC - decoding a
+ * fresh read of the *original* source stream through ffmpeg and piping the
+ * result directly into `outputStream` - no local disk, no intermediate
+ * file, no re-fetch of the already-uploaded full FLAC.
  *
  * Command shape (when start > 0 and end is finite):
- *   ffmpeg -ss <start> -i <signedUrl> -c copy -t <end-start> -f flac pipe:1
+ *   ffmpeg -ss <start> -i pipe:0 -ac 1 -ar <sampleRate> -c:a flac
+ *          -compression_level 8 -t <end-start> -f flac pipe:1
  * For the final, open-ended segment (`end === null`), no duration-limiting
- * option is passed and ffmpeg decodes to EOF.
+ * option is passed and ffmpeg decodes to EOF. Mirrors transcode.js's
+ * settings exactly so a split part is indistinguishable from the
+ * corresponding slice of the full-file output.
  *
- * `-ss` is applied as an input option (fast seek, before -i) for
- * performance. The segment length is expressed with `-t <duration>` rather
- * than an output-side `-to <end>`, since combining an input `-ss` with an
- * output `-to` has been ambiguous across ffmpeg versions (relative to the
- * original vs. the seeked timeline); `-t` sidesteps that entirely.
+ * This previously stream-copied (`-c copy`) a segment out of the
+ * already-transcoded FLAC, read via a signed HTTPS URL that ffmpeg fetched
+ * itself. Two things ruled that out:
+ *  - ffmpeg-static's bundled HTTPS/TLS input protocol reliably segfaults in
+ *    this environment (reproduced locally against a plain HTTPS server,
+ *    independent of GCP/gVisor - not an infra issue, a broken protocol
+ *    handler in this static build).
+ *  - Even setting that aside, `-ss` as an input option on a non-seekable
+ *    source combined with `-c copy` doesn't discard leading data - it just
+ *    shifts output timestamps, silently producing a segment of the wrong
+ *    length/content. `-ss` only seeks correctly on a non-seekable input
+ *    when ffmpeg is actually decoding (verified locally: piped stdin +
+ *    real transcode produced byte-identical PCM to a direct-file
+ *    baseline), which requires re-encoding rather than stream copy.
  *
- * Known limitations (see also probe.js/transcode.js for the moov-atom
- * limitation this repo documents in the same style):
- *  - `-ss` as an input option seeks to the nearest FLAC frame boundary, not
- *    an exact sample - at most tens of milliseconds, irrelevant here since
- *    cut points are chosen to land inside a detected silence interval.
- *  - The intermediate full FLAC (produced by transcode.js) is piped into a
- *    non-seekable GCS write stream, so it likely has no seek table. Seeking
- *    into it via a signed URL is still correct (ffmpeg's flac demuxer
- *    locates frames by sync-code scanning regardless) but is an
- *    O(bytes-before-target) scan rather than an O(1) indexed seek - a
- *    performance characteristic for later parts of long recordings, not a
- *    correctness bug.
+ * Re-decoding the source per part (rather than cutting the encoded FLAC)
+ * costs more CPU - each segment decodes from the start of the source
+ * through its own cut point, same O(bytes-before-target) shape the old
+ * approach already had, just spent on real audio decode instead of cheap
+ * FLAC frame scanning - but it reuses the exact stdin-pipe pattern that
+ * `transcode.js` and `silence.js` already rely on successfully in
+ * production, and sidesteps ffmpeg's HTTPS input entirely.
  *
- * `signedUrl` is a bearer credential (its query string, not just its path,
- * grants read access to the output object) - it must never reach logs
- * verbatim. Both the "start" log below and any ffmpeg-error stderr/message
- * passed through runFfmpegPipeline are redacted via `redactSignedUrl`.
+ * `inputStream` must be a fresh read of the source object (each segment
+ * decodes independently from byte 0), not shared or reused across calls.
  *
- * @param {string} signedUrl
+ * @param {import('stream').Readable} inputStream
  * @param {import('stream').Writable} outputStream
  * @param {{ start: number, end: number|null }} segment
+ * @param {{ sampleRate: number }} audioProps
  * @returns {Promise<void>}
  */
-export function cutFlacSegment(signedUrl, outputStream, { start, end }) {
-	const command = ffmpeg(signedUrl);
+export function transcodeFlacSegment(
+	inputStream,
+	outputStream,
+	{ start, end },
+	{ sampleRate },
+) {
+	const command = ffmpeg(inputStream)
+		.audioCodec("flac")
+		.audioChannels(1)
+		.audioFrequency(sampleRate)
+		.format("flac")
+		.outputOptions(["-compression_level 8"]);
+
 	if (start > 0) command.seekInput(start);
-
-	const outputOptions = ["-c", "copy"];
-	if (end !== null) outputOptions.push("-t", String(end - start));
-	command.outputOptions(outputOptions).format("flac");
-
-	const redact = (text) => redactSignedUrl(text, signedUrl);
+	if (end !== null) command.outputOptions(["-t", String(end - start)]);
 
 	command.on("start", (cmdLine) => {
-		console.log(
-			JSON.stringify({ msg: "split ffmpeg started", cmd: redact(cmdLine) }),
-		);
+		console.log(JSON.stringify({ msg: "split ffmpeg started", cmd: cmdLine }));
 	});
 
 	return runFfmpegPipeline(command, outputStream, {
 		commandErrorLabel: "split ffmpeg",
 		streamErrorLabel: "GCS write stream",
-		redact,
 	});
-}
-
-/**
- * Strip the credential-bearing query string off any occurrence of
- * `signedUrl` inside `text`, leaving only the origin and path so logs stay
- * useful for debugging without leaking the bearer token.
- *
- * @param {string} text
- * @param {string} signedUrl
- * @returns {string}
- */
-function redactSignedUrl(text, signedUrl) {
-	if (!text) return text;
-	try {
-		const { origin, pathname } = new URL(signedUrl);
-		return text.split(signedUrl).join(`${origin}${pathname}?<redacted>`);
-	} catch {
-		return text;
-	}
 }

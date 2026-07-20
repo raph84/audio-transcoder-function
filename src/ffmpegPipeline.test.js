@@ -54,30 +54,6 @@ describe("runFfmpegPipeline", () => {
 		await expect(promise).rejects.toThrow("stderr detail");
 	});
 
-	it("passes the error message and stderr tail through `redact` when given", async () => {
-		const command = makeCommand();
-		const out = makeOutputStream();
-
-		const promise = runFfmpegPipeline(command, out, {
-			commandErrorLabel: "x",
-			streamErrorLabel: "y",
-			redact: (text) => text.replaceAll("secret", "<redacted>"),
-		});
-
-		command.emit("error", new Error("boom secret"), "", "stderr secret detail");
-
-		let error;
-		try {
-			await promise;
-		} catch (err) {
-			error = err;
-		}
-
-		expect(error.message).not.toContain("secret");
-		expect(error.message).toContain("boom <redacted>");
-		expect(error.message).toContain("stderr <redacted> detail");
-	});
-
 	it("rejects when the output stream emits an error", async () => {
 		const command = makeCommand();
 		const out = makeOutputStream();

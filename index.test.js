@@ -8,22 +8,19 @@ const {
 	reg,
 	mockCreateReadStream,
 	mockCreateWriteStream,
-	mockGetSignedUrl,
 	mockFile,
 	mockBucket,
 	mockProbeAudio,
 	mockTranscodeToFlac,
 	mockDetectSilence,
 	mockComputeSplitPoints,
-	mockCutFlacSegment,
+	mockTranscodeFlacSegment,
 } = vi.hoisted(() => {
 	const mockCreateReadStream = vi.fn();
 	const mockCreateWriteStream = vi.fn();
-	const mockGetSignedUrl = vi.fn();
 	const mockFile = vi.fn(() => ({
 		createReadStream: mockCreateReadStream,
 		createWriteStream: mockCreateWriteStream,
-		getSignedUrl: mockGetSignedUrl,
 	}));
 	const mockBucket = vi.fn(() => ({ file: mockFile }));
 
@@ -31,14 +28,13 @@ const {
 		reg: { handler: null },
 		mockCreateReadStream,
 		mockCreateWriteStream,
-		mockGetSignedUrl,
 		mockFile,
 		mockBucket,
 		mockProbeAudio: vi.fn(),
 		mockTranscodeToFlac: vi.fn(),
 		mockDetectSilence: vi.fn(),
 		mockComputeSplitPoints: vi.fn(),
-		mockCutFlacSegment: vi.fn(),
+		mockTranscodeFlacSegment: vi.fn(),
 	};
 });
 
@@ -60,7 +56,9 @@ vi.mock("./src/silence.js", () => ({
 	detectSilence: mockDetectSilence,
 	computeSplitPoints: mockComputeSplitPoints,
 }));
-vi.mock("./src/split.js", () => ({ cutFlacSegment: mockCutFlacSegment }));
+vi.mock("./src/split.js", () => ({
+	transcodeFlacSegment: mockTranscodeFlacSegment,
+}));
 
 // Import index.js — triggers the cloudEvent() registration.
 import "./index.js";
@@ -73,7 +71,6 @@ describe("transcodeAudio handler", () => {
 		mockFile.mockReturnValue({
 			createReadStream: mockCreateReadStream,
 			createWriteStream: mockCreateWriteStream,
-			getSignedUrl: mockGetSignedUrl,
 		});
 		mockBucket.mockReturnValue({ file: mockFile });
 	});
@@ -201,8 +198,7 @@ describe("transcodeAudio handler", () => {
 
 		expect(mockDetectSilence).not.toHaveBeenCalled();
 		expect(mockComputeSplitPoints).not.toHaveBeenCalled();
-		expect(mockCutFlacSegment).not.toHaveBeenCalled();
-		expect(mockGetSignedUrl).not.toHaveBeenCalled();
+		expect(mockTranscodeFlacSegment).not.toHaveBeenCalled();
 		expect(mockCreateReadStream).toHaveBeenCalledTimes(2);
 	});
 
@@ -281,15 +277,13 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 		vi.clearAllMocks();
 		mockCreateReadStream.mockReturnValue(new EventEmitter());
 		mockCreateWriteStream.mockReturnValue(new EventEmitter());
-		mockGetSignedUrl.mockResolvedValue(["https://signed.example/fake-url"]);
 		mockFile.mockReturnValue({
 			createReadStream: mockCreateReadStream,
 			createWriteStream: mockCreateWriteStream,
-			getSignedUrl: mockGetSignedUrl,
 		});
 		mockBucket.mockReturnValue({ file: mockFile });
 		mockTranscodeToFlac.mockResolvedValue();
-		mockCutFlacSegment.mockResolvedValue();
+		mockTranscodeFlacSegment.mockResolvedValue();
 
 		// Re-importing index.js re-runs the cloudEvent(...) registration
 		// (via the mocked functions-framework), overwriting reg.handler with
@@ -313,7 +307,7 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 
 		expect(mockDetectSilence).not.toHaveBeenCalled();
 		expect(mockComputeSplitPoints).not.toHaveBeenCalled();
-		expect(mockCutFlacSegment).not.toHaveBeenCalled();
+		expect(mockTranscodeFlacSegment).not.toHaveBeenCalled();
 	});
 
 	it("skips the split pipeline when durationSeconds is unknown (null)", async () => {
@@ -332,12 +326,13 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 	});
 
 	it("runs the full split pipeline when duration exceeds the threshold", async () => {
-		mockProbeAudio.mockResolvedValue({
+		const audioProps = {
 			codec: "aac",
 			sampleRate: 44100,
 			channels: 2,
 			durationSeconds: 7200, // 2 hours, above the 60-minute threshold
-		});
+		};
+		mockProbeAudio.mockResolvedValue(audioProps);
 
 		const silenceIntervals = [{ start: 3590, end: 3595 }];
 
@@ -356,11 +351,13 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 			callOrder.push("detectSilence");
 			return silenceIntervals;
 		});
-		mockCutFlacSegment.mockImplementation(async (_url, _stream, segment) => {
-			callOrder.push(`cut-start-${segment.start}`);
-			await Promise.resolve();
-			callOrder.push(`cut-end-${segment.start}`);
-		});
+		mockTranscodeFlacSegment.mockImplementation(
+			async (_readStream, _writeStream, segment) => {
+				callOrder.push(`cut-start-${segment.start}`);
+				await Promise.resolve();
+				callOrder.push(`cut-end-${segment.start}`);
+			},
+		);
 
 		await reg.handler({
 			data: { bucket: "my-bucket", name: "source/recordings/session.m4a" },
@@ -370,9 +367,9 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 		expect(callOrder[0]).toBe("transcode");
 		expect(callOrder[1]).toBe("detectSilence");
 
-		// A third, fresh read stream is opened for the silencedetect pass
-		// (probe + main transcode + silencedetect).
-		expect(mockCreateReadStream).toHaveBeenCalledTimes(3);
+		// Fresh read streams: probe + main transcode + silencedetect + one per
+		// part (each part re-reads the source independently).
+		expect(mockCreateReadStream).toHaveBeenCalledTimes(3 + segments.length);
 
 		expect(mockComputeSplitPoints).toHaveBeenCalledWith({
 			durationSeconds: 7200,
@@ -381,25 +378,13 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 			lookbackMaxSeconds: 120,
 		});
 
-		expect(mockGetSignedUrl).toHaveBeenCalledWith(
-			expect.objectContaining({
-				version: "v4",
-				action: "read",
-				expires: expect.any(Number),
-			}),
-		);
-		expect(mockGetSignedUrl.mock.calls[0][0].expires).toBeGreaterThan(
-			Date.now(),
-		);
-
-		// getSignedUrl was requested on the full output file.
 		const filePaths = mockFile.mock.calls.map((c) => c[0]);
 		expect(filePaths).toContain("transcoded/recordings/session.flac");
 
-		// cutFlacSegment called once per segment, all started concurrently
-		// (each part is an independent read + write, so all three "start"
-		// before any of them "end").
-		expect(mockCutFlacSegment).toHaveBeenCalledTimes(3);
+		// transcodeFlacSegment called once per segment, all started
+		// concurrently (each part is an independent read + write, so all
+		// three "start" before any of them "end").
+		expect(mockTranscodeFlacSegment).toHaveBeenCalledTimes(3);
 		expect(callOrder.slice(2)).toEqual([
 			"cut-start-0",
 			"cut-start-3592.5",
@@ -413,8 +398,12 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 		expect(filePaths).toContain("transcoded/recordings/session.part002.flac");
 		expect(filePaths).toContain("transcoded/recordings/session.part003.flac");
 
-		for (const call of mockCutFlacSegment.mock.calls) {
-			expect(call[0]).toBe("https://signed.example/fake-url");
+		// Each part gets the segment and the probed audioProps (for the
+		// sample rate ffmpeg needs to re-encode at).
+		for (let i = 0; i < segments.length; i++) {
+			const call = mockTranscodeFlacSegment.mock.calls[i];
+			expect(call[2]).toBe(segments[i]);
+			expect(call[3]).toBe(audioProps);
 		}
 	});
 
@@ -434,7 +423,7 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 		).resolves.toBeUndefined();
 
 		expect(mockTranscodeToFlac).toHaveBeenCalledOnce();
-		expect(mockCutFlacSegment).not.toHaveBeenCalled();
+		expect(mockTranscodeFlacSegment).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledWith(
 			expect.stringContaining("split failed"),
 		);
@@ -457,7 +446,7 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 			{ start: 3600, end: 7000 },
 			{ start: 7000, end: null },
 		]);
-		mockCutFlacSegment
+		mockTranscodeFlacSegment
 			.mockResolvedValueOnce(undefined)
 			.mockRejectedValueOnce(new Error("upload aborted"))
 			.mockResolvedValueOnce(undefined);
@@ -468,7 +457,7 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 
 		// All parts are cut concurrently, so a failure in one doesn't stop the
 		// others from being attempted.
-		expect(mockCutFlacSegment).toHaveBeenCalledTimes(3);
+		expect(mockTranscodeFlacSegment).toHaveBeenCalledTimes(3);
 		expect(errorSpy).toHaveBeenCalledWith(
 			expect.stringContaining("split failed"),
 		);

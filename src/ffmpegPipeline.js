@@ -25,26 +25,15 @@ import { TransientError } from "./errors.js";
  * distinction (silence.js, split.js) omit it and keep the original generic
  * wrapping for every command error.
  *
- * If `redact` is given, it's applied to the ffmpeg error message and stderr
- * tail before they're embedded in the rejected Error - split.js uses this
- * to strip its signed input URL out of ffmpeg's own diagnostic output (e.g.
- * an "Input #0 ... from '<url>'" banner line), since that URL is a bearer
- * credential and this Error's message is logged by the caller.
- *
  * @param {import('fluent-ffmpeg').FfmpegCommand} command
  * @param {import('stream').Writable} outputStream
- * @param {{ commandErrorLabel: string, streamErrorLabel: string, classifyStreamError?: (err: Error, prefix: string) => Error, redact?: (text: string) => string }} labels
+ * @param {{ commandErrorLabel: string, streamErrorLabel: string, classifyStreamError?: (err: Error, prefix: string) => Error }} labels
  * @returns {Promise<void>}
  */
 export function runFfmpegPipeline(
 	command,
 	outputStream,
-	{
-		commandErrorLabel,
-		streamErrorLabel,
-		classifyStreamError,
-		redact = (text) => text,
-	},
+	{ commandErrorLabel, streamErrorLabel, classifyStreamError },
 ) {
 	return new Promise((resolve, reject) => {
 		let settled = false;
@@ -76,12 +65,8 @@ export function runFfmpegPipeline(
 			if (classifyStreamError && err.outputStreamError) {
 				return settle(wrapOutputStreamError(err.outputStreamError));
 			}
-			const detail = stderr ? `\nstderr: ${redact(stderr).slice(-500)}` : "";
-			settle(
-				new Error(
-					`${commandErrorLabel} error: ${redact(err.message)}${detail}`,
-				),
-			);
+			const detail = stderr ? `\nstderr: ${stderr.slice(-500)}` : "";
+			settle(new Error(`${commandErrorLabel} error: ${err.message}${detail}`));
 		});
 
 		outputStream.on("finish", () => settle());

@@ -69,7 +69,7 @@ src/ffmpeg.js         fluent-ffmpeg instance wired to the static ffmpeg/ffprobe 
 src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels/duration
 src/transcode.js      Streams a source file through ffmpeg into a FLAC output stream
 src/silence.js         Silencedetect pass + silence-aware split point selection
-src/split.js           Cuts one FLAC segment out of a signed URL via ffmpeg seek + stream copy
+src/split.js           Transcodes one segment of the source directly to FLAC (fresh read + ffmpeg seek)
 ```
 
 ## Deploying
@@ -106,29 +106,25 @@ rather than redelivered. Passing `--retry` would make Eventarc redeliver the
 event with exponential backoff for up to 24 hours, which is undesirable here
 since a timeout is likely to just recur on redelivery.
 
-### Splitting: extra one-time IAM grant
+### Splitting: no extra IAM grant needed
 
-If you set `SPLIT_AFTER_MINUTES`, the function generates a short-lived
-signed URL for the uploaded FLAC (to seek into it for cutting parts). On
-Cloud Functions Gen2 under Application Default Credentials, this requires
-the runtime service account to be able to sign as itself:
-
-```bash
-gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
-  --member="serviceAccount:$SERVICE_ACCOUNT" \
-  --role="roles/iam.serviceAccountTokenCreator" \
-  --project="$PROJECT_ID"
-```
-
-Without this, the full FLAC still uploads normally, but `getSignedUrl()`
-fails and no split parts are ever produced (the failure is caught, logged
-as `"split failed"`, and swallowed — see the README's Error handling
-section).
+If you set `SPLIT_AFTER_MINUTES`, each part is produced by re-reading the
+*source* object directly (same read path as probe/transcode/silencedetect)
+and transcoding that segment straight to FLAC — no signed URL is generated
+and ffmpeg never fetches anything over HTTPS itself. (An earlier version of
+this feature stream-copied parts out of the already-uploaded FLAC via a
+self-signed URL; that was dropped after ffmpeg-static's bundled HTTPS/TLS
+input protocol turned out to reliably segfault, independent of GCP/gVisor.)
+The runtime service account only needs the read/write access already
+described above — nothing extra to grant.
 
 Also consider raising `TIMEOUT` beyond the default `300s` when splitting is
 enabled for long recordings: the whole invocation (probe + transcode +
-silencedetect + all part uploads, cut concurrently) has to fit inside one
-Cloud Functions Gen2 invocation, which supports up to `3600s`.
+silencedetect + all part transcodes, run concurrently) has to fit inside one
+Cloud Functions Gen2 invocation, which supports up to `3600s`. Splitting now
+costs more CPU than before — each part re-decodes the source from byte 0
+through its own cut point — so budget timeout/CPU accordingly for recordings
+with many parts.
 
 ## Dependency updates
 

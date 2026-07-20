@@ -1,12 +1,16 @@
 import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // State shared between the vi.mock factory (hoisted) and each test.
 const state = vi.hoisted(() => ({
 	inputArg: null,
 	seekInputArg: null,
-	outputOptionsArg: null,
+	audioCodecArg: null,
+	audioChannelsArg: null,
+	audioFrequencyArg: null,
 	formatArg: null,
+	outputOptionsArg: [],
 	handlers: {},
 	pipeStream: null,
 	pipeOpts: null,
@@ -16,16 +20,28 @@ vi.mock("fluent-ffmpeg", () => {
 	function buildCmd(input) {
 		state.inputArg = input;
 		const cmd = {};
+		cmd.audioCodec = (v) => {
+			state.audioCodecArg = v;
+			return cmd;
+		};
+		cmd.audioChannels = (v) => {
+			state.audioChannelsArg = v;
+			return cmd;
+		};
+		cmd.audioFrequency = (v) => {
+			state.audioFrequencyArg = v;
+			return cmd;
+		};
+		cmd.format = (v) => {
+			state.formatArg = v;
+			return cmd;
+		};
 		cmd.seekInput = (v) => {
 			state.seekInputArg = v;
 			return cmd;
 		};
 		cmd.outputOptions = (v) => {
-			state.outputOptionsArg = v;
-			return cmd;
-		};
-		cmd.format = (v) => {
-			state.formatArg = v;
+			state.outputOptionsArg.push(...v);
 			return cmd;
 		};
 		cmd.on = (event, handler) => {
@@ -52,69 +68,130 @@ vi.mock("@ffprobe-installer/ffprobe", () => ({
 	default: { path: "/mock/ffprobe" },
 }));
 
-import { cutFlacSegment } from "./split.js";
+import { transcodeFlacSegment } from "./split.js";
+
+function makeInputStream() {
+	return new Readable({ read() {} });
+}
 
 function makeOutputStream() {
 	return new EventEmitter();
 }
 
-const SIGNED_URL = "https://storage.googleapis.com/bucket/obj?sig=abc";
+const AUDIO_PROPS = { sampleRate: 44100 };
 
-describe("cutFlacSegment", () => {
+describe("transcodeFlacSegment", () => {
 	beforeEach(() => {
 		Object.assign(state, {
 			inputArg: null,
 			seekInputArg: null,
-			outputOptionsArg: null,
+			audioCodecArg: null,
+			audioChannelsArg: null,
+			audioFrequencyArg: null,
 			formatArg: null,
+			outputOptionsArg: [],
 			handlers: {},
 			pipeStream: null,
 			pipeOpts: null,
 		});
 	});
 
-	it("passes the signed URL as ffmpeg's input", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 0, end: 60 });
-		expect(state.inputArg).toBe(SIGNED_URL);
+	it("passes the input stream as ffmpeg's input", () => {
+		const input = makeInputStream();
+		transcodeFlacSegment(
+			input,
+			makeOutputStream(),
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
+		expect(state.inputArg).toBe(input);
+	});
+
+	it("transcodes to flac, mono, at the probed sample rate", () => {
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 0, end: 60 },
+			{ sampleRate: 16000 },
+		);
+		expect(state.audioCodecArg).toBe("flac");
+		expect(state.audioChannelsArg).toBe(1);
+		expect(state.audioFrequencyArg).toBe(16000);
+		expect(state.formatArg).toBe("flac");
+	});
+
+	it("sets compression level 8 in outputOptions", () => {
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
+		expect(state.outputOptionsArg).toContain("-compression_level 8");
 	});
 
 	it("calls seekInput when start > 0", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 120, end: 180 });
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 120, end: 180 },
+			AUDIO_PROPS,
+		);
 		expect(state.seekInputArg).toBe(120);
 	});
 
 	it("does not call seekInput when start === 0", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 0, end: 60 });
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 		expect(state.seekInputArg).toBeNull();
 	});
 
 	it("includes -t <duration> in outputOptions when end is finite", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 60, end: 150 });
-		expect(state.outputOptionsArg).toEqual(["-c", "copy", "-t", "90"]);
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 60, end: 150 },
+			AUDIO_PROPS,
+		);
+		expect(state.outputOptionsArg).toEqual(
+			expect.arrayContaining(["-t", "90"]),
+		);
 	});
 
-	it("omits -t/-to entirely when end is null (open-ended final segment)", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 120, end: null });
-		expect(state.outputOptionsArg).toEqual(["-c", "copy"]);
-	});
-
-	it("always includes -c copy and sets format to flac", () => {
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 0, end: 60 });
-		expect(state.outputOptionsArg).toContain("-c");
-		expect(state.outputOptionsArg).toContain("copy");
-		expect(state.formatArg).toBe("flac");
+	it("omits -t entirely when end is null (open-ended final segment)", () => {
+		transcodeFlacSegment(
+			makeInputStream(),
+			makeOutputStream(),
+			{ start: 120, end: null },
+			AUDIO_PROPS,
+		);
+		expect(state.outputOptionsArg).not.toContain("-t");
 	});
 
 	it("pipes to the output stream with { end: true }", () => {
 		const out = makeOutputStream();
-		cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+		transcodeFlacSegment(
+			makeInputStream(),
+			out,
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 		expect(state.pipeStream).toBe(out);
 		expect(state.pipeOpts).toEqual({ end: true });
 	});
 
 	it("resolves when the output stream emits finish", async () => {
 		const out = makeOutputStream();
-		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+		const promise = transcodeFlacSegment(
+			makeInputStream(),
+			out,
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 
 		out.emit("finish");
 
@@ -123,7 +200,12 @@ describe("cutFlacSegment", () => {
 
 	it("rejects, wrapping the stderr tail, when the command emits an error", async () => {
 		const out = makeOutputStream();
-		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+		const promise = transcodeFlacSegment(
+			makeInputStream(),
+			out,
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 
 		state.handlers.error(new Error("seek failed"), "", "stderr detail");
 
@@ -131,47 +213,14 @@ describe("cutFlacSegment", () => {
 		await expect(promise).rejects.toThrow("stderr detail");
 	});
 
-	it("redacts the signed URL's query string from the logged start command", () => {
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-
-		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 0, end: 60 });
-		state.handlers.start(`ffmpeg -i ${SIGNED_URL} -c copy -f flac pipe:1`);
-
-		const logged = logSpy.mock.calls[0][0];
-		expect(logged).not.toContain("sig=abc");
-		expect(logged).toContain(
-			"https://storage.googleapis.com/bucket/obj?<redacted>",
-		);
-
-		logSpy.mockRestore();
-	});
-
-	it("redacts the signed URL's query string from ffmpeg error stderr/message", async () => {
-		const out = makeOutputStream();
-		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
-
-		state.handlers.error(
-			new Error(`Invalid data found: ${SIGNED_URL}`),
-			"",
-			`Input #0, flac, from '${SIGNED_URL}':`,
-		);
-
-		let error;
-		try {
-			await promise;
-		} catch (err) {
-			error = err;
-		}
-
-		expect(error.message).not.toContain("sig=abc");
-		expect(error.message).toContain(
-			"https://storage.googleapis.com/bucket/obj?<redacted>",
-		);
-	});
-
 	it("rejects when the output stream emits an error", async () => {
 		const out = makeOutputStream();
-		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+		const promise = transcodeFlacSegment(
+			makeInputStream(),
+			out,
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 
 		out.emit("error", new Error("upload aborted"));
 
@@ -182,7 +231,12 @@ describe("cutFlacSegment", () => {
 
 	it("settles only once when both a command error and a stream error fire", async () => {
 		const out = makeOutputStream();
-		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+		const promise = transcodeFlacSegment(
+			makeInputStream(),
+			out,
+			{ start: 0, end: 60 },
+			AUDIO_PROPS,
+		);
 
 		state.handlers.error(new Error("ffmpeg died"), "", "");
 		out.emit("error", new Error("stream also died"));
