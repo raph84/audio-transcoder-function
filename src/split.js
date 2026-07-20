@@ -30,6 +30,11 @@ import { runFfmpegPipeline } from "./ffmpegPipeline.js";
  *    performance characteristic for later parts of long recordings, not a
  *    correctness bug.
  *
+ * `signedUrl` is a bearer credential (its query string, not just its path,
+ * grants read access to the output object) - it must never reach logs
+ * verbatim. Both the "start" log below and any ffmpeg-error stderr/message
+ * passed through runFfmpegPipeline are redacted via `redactSignedUrl`.
+ *
  * @param {string} signedUrl
  * @param {import('stream').Writable} outputStream
  * @param {{ start: number, end: number|null }} segment
@@ -43,12 +48,36 @@ export function cutFlacSegment(signedUrl, outputStream, { start, end }) {
 	if (end !== null) outputOptions.push("-t", String(end - start));
 	command.outputOptions(outputOptions).format("flac");
 
+	const redact = (text) => redactSignedUrl(text, signedUrl);
+
 	command.on("start", (cmdLine) => {
-		console.log(JSON.stringify({ msg: "split ffmpeg started", cmd: cmdLine }));
+		console.log(
+			JSON.stringify({ msg: "split ffmpeg started", cmd: redact(cmdLine) }),
+		);
 	});
 
 	return runFfmpegPipeline(command, outputStream, {
 		commandErrorLabel: "split ffmpeg",
 		streamErrorLabel: "GCS write stream",
+		redact,
 	});
+}
+
+/**
+ * Strip the credential-bearing query string off any occurrence of
+ * `signedUrl` inside `text`, leaving only the origin and path so logs stay
+ * useful for debugging without leaking the bearer token.
+ *
+ * @param {string} text
+ * @param {string} signedUrl
+ * @returns {string}
+ */
+function redactSignedUrl(text, signedUrl) {
+	if (!text) return text;
+	try {
+		const { origin, pathname } = new URL(signedUrl);
+		return text.split(signedUrl).join(`${origin}${pathname}?<redacted>`);
+	} catch {
+		return text;
+	}
 }

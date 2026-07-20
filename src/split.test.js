@@ -131,6 +131,44 @@ describe("cutFlacSegment", () => {
 		await expect(promise).rejects.toThrow("stderr detail");
 	});
 
+	it("redacts the signed URL's query string from the logged start command", () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		cutFlacSegment(SIGNED_URL, makeOutputStream(), { start: 0, end: 60 });
+		state.handlers.start(`ffmpeg -i ${SIGNED_URL} -c copy -f flac pipe:1`);
+
+		const logged = logSpy.mock.calls[0][0];
+		expect(logged).not.toContain("sig=abc");
+		expect(logged).toContain(
+			"https://storage.googleapis.com/bucket/obj?<redacted>",
+		);
+
+		logSpy.mockRestore();
+	});
+
+	it("redacts the signed URL's query string from ffmpeg error stderr/message", async () => {
+		const out = makeOutputStream();
+		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
+
+		state.handlers.error(
+			new Error(`Invalid data found: ${SIGNED_URL}`),
+			"",
+			`Input #0, flac, from '${SIGNED_URL}':`,
+		);
+
+		let error;
+		try {
+			await promise;
+		} catch (err) {
+			error = err;
+		}
+
+		expect(error.message).not.toContain("sig=abc");
+		expect(error.message).toContain(
+			"https://storage.googleapis.com/bucket/obj?<redacted>",
+		);
+	});
+
 	it("rejects when the output stream emits an error", async () => {
 		const out = makeOutputStream();
 		const promise = cutFlacSegment(SIGNED_URL, out, { start: 0, end: 60 });
