@@ -60,16 +60,29 @@ describe("probeAudio", () => {
 		state.lastProc = null;
 	});
 
-	it("resolves with codec, sampleRate, and channels from the audio stream", async () => {
+	it("resolves with codec, sampleRate, channels, and durationSeconds from the probe data", async () => {
 		const promise = probeAudio(makeStream());
 
-		emitStdout(oneAudioStream);
+		emitStdout(
+			JSON.stringify({
+				streams: [
+					{
+						codec_type: "audio",
+						codec_name: "aac",
+						sample_rate: "44100",
+						channels: 2,
+					},
+				],
+				format: { duration: "185.023" },
+			}),
+		);
 		close(0);
 
 		await expect(promise).resolves.toEqual({
 			codec: "aac",
 			sampleRate: 44100,
 			channels: 2,
+			durationSeconds: 185.023,
 		});
 	});
 
@@ -200,5 +213,61 @@ describe("probeAudio", () => {
 		close(0);
 
 		await expect(promise).rejects.toBeInstanceOf(TransientError);
+	});
+
+	// --- durationSeconds ---
+
+	it("resolves durationSeconds: null when format.duration is 'N/A'", async () => {
+		const promise = probeAudio(makeStream());
+
+		emitStdout(
+			JSON.stringify({
+				streams: [
+					{
+						codec_type: "audio",
+						codec_name: "aac",
+						sample_rate: "44100",
+						channels: 2,
+					},
+				],
+				format: { duration: "N/A" },
+			}),
+		);
+		close(0);
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
+	});
+
+	it("resolves durationSeconds: null when format is missing entirely", async () => {
+		const promise = probeAudio(makeStream());
+
+		emitStdout(oneAudioStream);
+		close(0);
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
+	});
+
+	it("resolves durationSeconds: null when format.duration is missing", async () => {
+		const promise = probeAudio(makeStream());
+
+		emitStdout(
+			JSON.stringify({
+				streams: [
+					{
+						codec_type: "audio",
+						codec_name: "aac",
+						sample_rate: "44100",
+						channels: 2,
+					},
+				],
+				format: {},
+			}),
+		);
+		close(0);
+
+		const result = await promise;
+		expect(result.durationSeconds).toBeNull();
 	});
 });

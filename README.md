@@ -24,9 +24,24 @@ The function is triggered by a Cloud Storage `object.finalized` event
 4. **Write.** The FLAC output is uploaded to
    `OUTPUT_PREFIX + <relative path of source, without extension> + .flac`, in
    `OUTPUT_BUCKET` if set, otherwise back in the source bucket.
+5. **Split (optional).** If `SPLIT_AFTER_MINUTES` is set and the recording's
+   duration exceeds it, the function also cuts the uploaded FLAC into
+   roughly-`SPLIT_AFTER_MINUTES`-long parts. Cut points are chosen at a
+   nearby moment of silence — the function walks backward from each
+   boundary to the closest detected silence, falling back to a hard cut
+   only if none is found nearby — so a split doesn't land mid-sentence.
+   Parts are uploaded alongside the full file as
+   `<full file stem>.part001.flac`, `.part002.flac`, etc. This is fully
+   opt-in: with `SPLIT_AFTER_MINUTES` unset, behavior is identical to the
+   full-file-only pipeline above.
 
 Everything is streamed end-to-end (GCS → ffprobe/ffmpeg → GCS) — the function
-never buffers a full file in memory or on local disk.
+never buffers a full file in memory or on local disk. The split step follows
+the same shape: each part re-decodes a fresh read of the *source* file
+straight to FLAC (not a cut of the already-uploaded FLAC), so no local disk
+or extra memory is used, but it costs more CPU per invocation than the
+full-file-only pipeline since every part decodes the source from the start
+through its own cut point — see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ### Error handling
 
@@ -47,6 +62,14 @@ file that will never succeed isn't retried forever.
   the end of the file) on a non-seekable pipe. Retrying can't fix any of
   these, since the problem is the file itself, not the environment. Most
   modern recorders (iOS, Android) write faststart M4A by default.
+- **Split-phase failures** (silence detection or a part upload failing) are
+  always logged (`"split failed"`) and swallowed, never rethrown,
+  regardless of the classification above. By the time the split step runs,
+  the full FLAC has already uploaded successfully; rethrowing would make
+  Eventarc redeliver the whole event and redo the (expensive) full
+  transcode just to retry what's usually a transient split-phase issue. If
+  splitting persistently fails, it will silently never produce parts —
+  consider a log-based alert on `"split failed"`.
 
 See `src/errors.js` (`TransientError` / `isTransientError`) for the
 classification mechanism.
@@ -56,12 +79,17 @@ classification mechanism.
 Runtime behavior is controlled by environment variables, read in
 `src/config.js`:
 
-| Variable        | Default        | Description                                          |
-| ---------------- | -------------- | ----------------------------------------------------- |
-| `SOURCE_PREFIX`  | `source/`      | Object path prefix that triggers transcoding          |
-| `OUTPUT_PREFIX`  | `transcoded/`  | Object path prefix for the transcoded output          |
-| `OUTPUT_FORMAT`  | `flac`         | Output format (currently only `flac` is supported)    |
-| `OUTPUT_BUCKET`  | source bucket  | Destination bucket, if different from the source      |
+| Variable                         | Default              | Description                                                          |
+| --------------------------------- | --------------------- | ---------------------------------------------------------------------- |
+| `SOURCE_PREFIX`                   | `source/`             | Object path prefix that triggers transcoding                           |
+| `OUTPUT_PREFIX`                   | `transcoded/`         | Object path prefix for the transcoded output                           |
+| `OUTPUT_FORMAT`                   | `flac`                | Output format (currently only `flac` is supported)                     |
+| `OUTPUT_BUCKET`                   | source bucket         | Destination bucket, if different from the source                       |
+| `SPLIT_AFTER_MINUTES`             | unset (disabled)      | Enables splitting; recordings longer than this get cut into parts      |
+| `SILENCE_NOISE_DB`                | `-30`                 | `silencedetect` noise threshold (dB) used to find candidate cut points |
+| `SILENCE_MIN_DURATION_SECONDS`    | `0.5`                 | Minimum quiet duration to count as silence                             |
+| `SILENCE_LOOKBACK_MAX_SECONDS`    | 25% of the split interval, capped at 120s | How far back from a split boundary to search for silence before falling back to a hard cut |
+| `SPLIT_PART_CONCURRENCY`          | `4`                   | Max number of split parts transcoded concurrently within one invocation |
 
 See `.env.example` for the full set of variables, including deployment-time
 settings (project, region, trigger bucket, memory, timeout).

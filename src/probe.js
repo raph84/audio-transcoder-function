@@ -15,6 +15,14 @@ import { TransientError } from "./errors.js";
  * cannot seek backward in a non-seekable pipe. Most modern recorders (iOS,
  * Android) write faststart M4A by default.
  *
+ * `format.duration` is normally populated from the MP4 `mvhd` atom, which
+ * faststart M4A keeps at the front of the file - same reason codec/sample
+ * rate detection already works over a pipe. It can still come back as "N/A"
+ * or be absent for unusual encoders; `Number("N/A")` is NaN, so this
+ * deliberately resolves to `durationSeconds: null` rather than throwing -
+ * an unknown duration must never fail the whole invocation, it should just
+ * disable the downstream split feature for that file.
+ *
  * We spawn ffprobe directly (rather than using fluent-ffmpeg's ffprobe()
  * helper) so this function holds the process handle. fluent-ffmpeg's static
  * ffprobe() helper spawns internally and never exposes the child process, so
@@ -24,7 +32,7 @@ import { TransientError } from "./errors.js";
  * reuse for later invocations. Holding the handle lets us kill it.
  *
  * @param {import('stream').Readable} readStream
- * @returns {Promise<{ codec: string, sampleRate: number, channels: number }>}
+ * @returns {Promise<{ codec: string, sampleRate: number, channels: number, durationSeconds: number|null }>}
  */
 export function probeAudio(readStream) {
 	return new Promise((resolve, reject) => {
@@ -40,7 +48,7 @@ export function probeAudio(readStream) {
 
 		const ffprobeProc = spawn(
 			ffprobeInstaller.path,
-			["-print_format", "json", "-show_streams", "pipe:0"],
+			["-print_format", "json", "-show_streams", "-show_format", "pipe:0"],
 			{ windowsHide: true },
 		);
 
@@ -98,10 +106,15 @@ export function probeAudio(readStream) {
 				return settle(new Error("No audio stream found in source file"));
 			}
 
+			const parsedDuration = Number(data.format?.duration);
+
 			settle(null, {
 				codec: audioStream.codec_name,
 				sampleRate: Number(audioStream.sample_rate),
 				channels: audioStream.channels,
+				durationSeconds: Number.isFinite(parsedDuration)
+					? parsedDuration
+					: null,
 			});
 		});
 	});

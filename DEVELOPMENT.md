@@ -66,8 +66,10 @@ on staged files automatically.
 index.js            Cloud Function entry point (transcodeAudio)
 src/config.js        Environment-variable configuration, validated at import time
 src/ffmpeg.js         fluent-ffmpeg instance wired to the static ffmpeg/ffprobe binaries
-src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels
+src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels/duration
 src/transcode.js      Streams a source file through ffmpeg into a FLAC output stream
+src/silence.js         Silencedetect pass + silence-aware split point selection
+src/split.js           Transcodes one segment of the source directly to FLAC (fresh read + ffmpeg seek)
 ```
 
 ## Deploying
@@ -90,7 +92,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --memory="$MEMORY" \
   --timeout="$TIMEOUT" \
   --service-account="$SERVICE_ACCOUNT" \
-  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )"
+  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )$( [ -n "$SPLIT_AFTER_MINUTES" ] && echo ",SPLIT_AFTER_MINUTES=$SPLIT_AFTER_MINUTES,SILENCE_NOISE_DB=$SILENCE_NOISE_DB,SILENCE_MIN_DURATION_SECONDS=$SILENCE_MIN_DURATION_SECONDS$( [ -n "$SILENCE_LOOKBACK_MAX_SECONDS" ] && echo ",SILENCE_LOOKBACK_MAX_SECONDS=$SILENCE_LOOKBACK_MAX_SECONDS" )$( [ -n "$SPLIT_PART_CONCURRENCY" ] && echo ",SPLIT_PART_CONCURRENCY=$SPLIT_PART_CONCURRENCY" )" )"
 ```
 
 The runtime service account needs read access to the trigger bucket and
@@ -103,6 +105,25 @@ one that hits the `--timeout` deadline — is logged and the event is dropped
 rather than redelivered. Passing `--retry` would make Eventarc redeliver the
 event with exponential backoff for up to 24 hours, which is undesirable here
 since a timeout is likely to just recur on redelivery.
+
+### Splitting: no extra IAM grant needed
+
+If you set `SPLIT_AFTER_MINUTES`, each part is produced by re-reading the
+*source* object directly (same read path as probe/transcode/silencedetect)
+and transcoding that segment straight to FLAC — no signed URL is generated
+and ffmpeg never fetches anything over HTTPS itself. The runtime service
+account only needs the read/write access already described above — nothing
+extra to grant.
+
+Also consider raising `TIMEOUT` beyond the default `300s` when splitting is
+enabled for long recordings: the whole invocation (probe + transcode +
+silencedetect + part transcodes) has to fit inside one Cloud Functions Gen2
+invocation, which supports up to `3600s`. Splitting costs real CPU — each
+part re-decodes the source from byte 0 through its own cut point — so budget
+timeout/CPU accordingly for recordings with many parts. Part transcodes run
+concurrently but capped at `SPLIT_PART_CONCURRENCY` (default `4`) rather than
+all at once, since each part is CPU-bound; raise it only if the runtime has
+CPU/memory headroom for more simultaneous decodes.
 
 ## Dependency updates
 

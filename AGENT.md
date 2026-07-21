@@ -40,11 +40,20 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
   bundled via `ffmpeg-static`, used by `src/transcode.js`.
 - `src/probe.js` — spawns `ffprobe` directly (bundled via
   `@ffprobe-installer/ffprobe`) and streams the source file into its stdin
-  to detect codec, sample rate, and channel count without buffering the
-  file. Spawns directly rather than going through fluent-ffmpeg's
-  `ffprobe()` helper so it holds the process handle — see Gotchas.
+  to detect codec, sample rate, channel count, and duration without
+  buffering the file. Spawns directly rather than going through
+  fluent-ffmpeg's `ffprobe()` helper so it holds the process handle — see
+  Gotchas.
 - `src/transcode.js` — streams the source file through `ffmpeg` into a
   writable stream, producing mono FLAC at the original sample rate.
+- `src/silence.js` — runs a decode-only `silencedetect` pass to find quiet
+  intervals, and the pure algorithm that picks silence-aware split points
+  near each `SPLIT_AFTER_MINUTES` boundary.
+- `src/split.js` — transcodes one segment of the source directly to FLAC
+  (fresh read + ffmpeg seek), used only when splitting is enabled.
+- `src/ffmpegPipeline.js` — shared "pipe an ffmpeg command into a writable
+  stream and settle a promise once" helper used by `src/transcode.js`,
+  `src/silence.js`, and `src/split.js`.
 
 Each `src/*.js` module has a co-located `*.test.js`; `index.test.js` covers
 the entry point.
@@ -87,6 +96,23 @@ the entry point.
   the comments in `src/probe.js` and `src/transcode.js`.
 - Only `flac` is currently a supported `OUTPUT_FORMAT`; `src/config.js`
   enforces this at startup.
+- `ffprobe`'s `format.duration` (used for `durationSeconds` in `src/probe.js`)
+  can come back as `"N/A"` or be missing entirely for unusual encoders;
+  this resolves to `durationSeconds: null` rather than throwing, since an
+  unknown duration should only disable the split feature, not fail the
+  whole invocation.
+- `src/split.js` re-decodes a fresh read of the *source* object per part
+  (same stdin-pipe pattern as `src/transcode.js`/`src/silence.js`). The
+  input is a non-seekable stdin pipe, so `-ss` seeks by decoding forward to
+  the target timestamp rather than an indexed seek — see the docstring in
+  `src/split.js` and DEVELOPMENT.md's "Splitting" section.
+- Each part decodes the source from byte 0 through its own cut point (an
+  O(bytes-before-target) cost per part), so splitting costs real CPU —
+  budget `TIMEOUT`/CPU accordingly for recordings with many parts (see
+  DEVELOPMENT.md).
+- No extra IAM grant is needed for splitting; the runtime service account
+  only needs the read/write access already granted for the rest of the
+  pipeline.
 - fluent-ffmpeg pipes the GCS read stream into ffmpeg's stdin internally
   for the transcode command, and forwards input-stream errors as a command
   `error` event with an `err.inputStreamError` marker, and output-stream
