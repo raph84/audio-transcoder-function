@@ -36,10 +36,12 @@ The function is triggered by a Cloud Storage `object.finalized` event
    full-file-only pipeline above.
 
 Everything is streamed end-to-end (GCS → ffprobe/ffmpeg → GCS) — the function
-never buffers a full file in memory or on local disk. The split step is the
-one exception in spirit but not in practice: rather than downloading
-anything, it seeks into the already-uploaded FLAC via a short-lived signed
-URL (HTTP range requests), so no local disk or extra memory is used either.
+never buffers a full file in memory or on local disk. The split step follows
+the same shape: each part re-decodes a fresh read of the *source* file
+straight to FLAC (not a cut of the already-uploaded FLAC), so no local disk
+or extra memory is used, but it costs more CPU per invocation than the
+full-file-only pipeline since every part decodes the source from the start
+through its own cut point — see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ### Error handling
 
@@ -66,8 +68,7 @@ file that will never succeed isn't retried forever.
   the full FLAC has already uploaded successfully; rethrowing would make
   Eventarc redeliver the whole event and redo the (expensive) full
   transcode just to retry what's usually a transient split-phase issue. If
-  splitting persistently fails (e.g. a missing IAM grant, see
-  [DEVELOPMENT.md](DEVELOPMENT.md)), it will silently never produce parts —
+  splitting persistently fails, it will silently never produce parts —
   consider a log-based alert on `"split failed"`.
 
 See `src/errors.js` (`TransientError` / `isTransientError`) for the
@@ -88,6 +89,7 @@ Runtime behavior is controlled by environment variables, read in
 | `SILENCE_NOISE_DB`                | `-30`                 | `silencedetect` noise threshold (dB) used to find candidate cut points |
 | `SILENCE_MIN_DURATION_SECONDS`    | `0.5`                 | Minimum quiet duration to count as silence                             |
 | `SILENCE_LOOKBACK_MAX_SECONDS`    | 25% of the split interval, capped at 120s | How far back from a split boundary to search for silence before falling back to a hard cut |
+| `SPLIT_PART_CONCURRENCY`          | `4`                   | Max number of split parts transcoded concurrently within one invocation |
 
 See `.env.example` for the full set of variables, including deployment-time
 settings (project, region, trigger bucket, memory, timeout).

@@ -49,8 +49,8 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
 - `src/silence.js` — runs a decode-only `silencedetect` pass to find quiet
   intervals, and the pure algorithm that picks silence-aware split points
   near each `SPLIT_AFTER_MINUTES` boundary.
-- `src/split.js` — cuts one FLAC segment via a signed-URL-based ffmpeg seek
-  + stream copy, used only when splitting is enabled.
+- `src/split.js` — transcodes one segment of the source directly to FLAC
+  (fresh read + ffmpeg seek), used only when splitting is enabled.
 - `src/ffmpegPipeline.js` — shared "pipe an ffmpeg command into a writable
   stream and settle a promise once" helper used by `src/transcode.js`,
   `src/silence.js`, and `src/split.js`.
@@ -101,21 +101,18 @@ the entry point.
   this resolves to `durationSeconds: null` rather than throwing, since an
   unknown duration should only disable the split feature, not fail the
   whole invocation.
-- `src/split.js` seeks into the already-uploaded FLAC via a signed URL,
-  relying on the bundled `ffmpeg-static` binary supporting the `https`
-  input protocol (`<binary> -protocols | grep https` to verify — confirmed
-  supported as of the `ffmpeg-static@5.3.0` build in use, but re-check if
-  that dependency is ever bumped to a different upstream build).
-- The intermediate full FLAC (from `src/transcode.js`) is written via a
-  non-seekable GCS write stream, so it very likely has no seek table.
-  `src/split.js`'s seeks into it are still correct (ffmpeg's flac demuxer
-  scans for sync codes regardless) but are an O(bytes-before-target) scan,
-  not an O(1) indexed seek — a performance characteristic for later parts
-  of very long recordings, not a correctness bug.
-- Splitting requires the runtime service account to have
-  `roles/iam.serviceAccountTokenCreator` on itself (for `getSignedUrl()`
-  under Application Default Credentials) — see DEVELOPMENT.md. Without it,
-  the full transcode still succeeds but no split parts are ever produced.
+- `src/split.js` re-decodes a fresh read of the *source* object per part
+  (same stdin-pipe pattern as `src/transcode.js`/`src/silence.js`). The
+  input is a non-seekable stdin pipe, so `-ss` seeks by decoding forward to
+  the target timestamp rather than an indexed seek — see the docstring in
+  `src/split.js` and DEVELOPMENT.md's "Splitting" section.
+- Each part decodes the source from byte 0 through its own cut point (an
+  O(bytes-before-target) cost per part), so splitting costs real CPU —
+  budget `TIMEOUT`/CPU accordingly for recordings with many parts (see
+  DEVELOPMENT.md).
+- No extra IAM grant is needed for splitting; the runtime service account
+  only needs the read/write access already granted for the rest of the
+  pipeline.
 - fluent-ffmpeg pipes the GCS read stream into ffmpeg's stdin internally
   for the transcode command, and forwards input-stream errors as a command
   `error` event with an `err.inputStreamError` marker, and output-stream
