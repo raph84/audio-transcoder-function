@@ -25,6 +25,8 @@ const {
 	mockBucket,
 	mockProbeAudio,
 	mockTranscodeToFlac,
+	mockPrepareInputSource,
+	mockCleanup,
 } = vi.hoisted(() => {
 	const mockCreateReadStream = vi.fn();
 	const mockCreateWriteStream = vi.fn();
@@ -42,6 +44,8 @@ const {
 		mockBucket,
 		mockProbeAudio: vi.fn(),
 		mockTranscodeToFlac: vi.fn(),
+		mockPrepareInputSource: vi.fn(),
+		mockCleanup: vi.fn(),
 	};
 });
 
@@ -59,6 +63,9 @@ vi.mock("@google-cloud/storage", () => ({
 
 vi.mock("./src/probe.js", () => ({ probeAudio: mockProbeAudio }));
 vi.mock("./src/transcode.js", () => ({ transcodeToFlac: mockTranscodeToFlac }));
+vi.mock("./src/inputSource.js", () => ({
+	prepareInputSource: mockPrepareInputSource,
+}));
 
 // src/parts.js is intentionally left unmocked: computeParts is pure logic,
 // and exercising it for real gives higher-confidence coverage of the exact
@@ -80,6 +87,13 @@ describe("transcodeAudio handler — splitting into parts", () => {
 		});
 		mockBucket.mockReturnValue({ file: mockFile });
 		mockProbeAudio.mockResolvedValue(defaultAudioProps);
+		mockCleanup.mockResolvedValue(undefined);
+		mockPrepareInputSource.mockResolvedValue({
+			fastStart: true,
+			openProbeInput: () => mockCreateReadStream(),
+			openTranscodeInput: () => mockCreateReadStream(),
+			cleanup: mockCleanup,
+		});
 	});
 
 	afterEach(() => {
@@ -188,5 +202,35 @@ describe("transcodeAudio handler — splitting into parts", () => {
 		).resolves.toBeUndefined();
 
 		expect(mockTranscodeToFlac).toHaveBeenCalledTimes(1);
+	});
+
+	it("cleans up the input source exactly once, after all parts finish", async () => {
+		mockTranscodeToFlac
+			.mockResolvedValueOnce({ duration: 300 })
+			.mockResolvedValue({ duration: undefined });
+
+		await reg.handler({ data: { bucket: "b", name: "source/session.m4a" } });
+
+		expect(mockCleanup).toHaveBeenCalledOnce();
+	});
+
+	it("reuses the same local temp file path for the full transcode and every part when non-faststart", async () => {
+		mockPrepareInputSource.mockResolvedValue({
+			fastStart: false,
+			openProbeInput: () => "/tmp/fake-path.m4a",
+			openTranscodeInput: () => "/tmp/fake-path.m4a",
+			cleanup: mockCleanup,
+		});
+		mockTranscodeToFlac
+			.mockResolvedValueOnce({ duration: 300 })
+			.mockResolvedValue({ duration: undefined });
+
+		await reg.handler({ data: { bucket: "b", name: "source/session.m4a" } });
+
+		// full transcode + 3 parts, all against the same local path
+		expect(mockCreateReadStream).not.toHaveBeenCalled();
+		for (const call of mockTranscodeToFlac.mock.calls) {
+			expect(call[0]).toBe("/tmp/fake-path.m4a");
+		}
 	});
 });

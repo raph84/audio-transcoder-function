@@ -10,10 +10,10 @@ import { TransientError } from "./errors.js";
  * moov atom is at the end of the file, because the codec info is in the
  * container header at the beginning.
  *
- * NOTE: Non-faststart M4A files (moov atom at end) will cause the subsequent
- * ffmpeg transcoding step to fail with "moov atom not found", because ffmpeg
- * cannot seek backward in a non-seekable pipe. Most modern recorders (iOS,
- * Android) write faststart M4A by default.
+ * NOTE: Non-faststart M4A files (moov atom at end) can't be transcoded from
+ * a piped stream — see the `input` param below and `src/inputSource.js`,
+ * which routes these to a local temp file instead. Most modern recorders
+ * (iOS, Android) write faststart M4A by default.
  *
  * Deliberately does NOT report duration: container header duration metadata
  * (whether read via ffprobe here or via ffmpeg's own input parsing) has
@@ -30,24 +30,32 @@ import { TransientError } from "./errors.js";
  * would block on stdin forever, orphaned in a container Cloud Functions may
  * reuse for later invocations. Holding the handle lets us kill it.
  *
- * @param {import('stream').Readable} readStream
+ * `input` may also be a local file path (string) instead of a stream — used
+ * for non-faststart M4A, which `prepareInputSource` (src/inputSource.js)
+ * downloads to a local temp file first. In that case ffprobe reads the file
+ * directly (passed as its last argument instead of `pipe:0`), so none of the
+ * stream-piping/stream-error handling below applies.
+ *
+ * @param {import('stream').Readable | string} input
  * @returns {Promise<{ codec: string, sampleRate: number, channels: number }>}
  */
-export function probeAudio(readStream) {
+export function probeAudio(input) {
+	const isPath = typeof input === "string";
+
 	return new Promise((resolve, reject) => {
 		let settled = false;
 
 		function settle(err, value) {
 			if (settled) return;
 			settled = true;
-			readStream.removeListener("error", onStreamError);
+			if (!isPath) input.removeListener("error", onStreamError);
 			if (err) reject(err);
 			else resolve(value);
 		}
 
 		const ffprobeProc = spawn(
 			ffprobeInstaller.path,
-			["-print_format", "json", "-show_streams", "pipe:0"],
+			["-print_format", "json", "-show_streams", isPath ? input : "pipe:0"],
 			{ windowsHide: true },
 		);
 
@@ -56,14 +64,16 @@ export function probeAudio(readStream) {
 			settle(new TransientError(`source read stream error: ${err.message}`));
 		}
 
-		readStream.on("error", onStreamError);
+		if (!isPath) {
+			input.on("error", onStreamError);
 
-		// ffprobe often closes its own stdin once it has read enough of the
-		// header (before the source stream ends), which would otherwise raise
-		// EPIPE/ECONNRESET here — expected, not a failure. Node's pipe()
-		// already unpipes readStream once ffprobeProc.stdin closes.
-		ffprobeProc.stdin.on("error", () => {});
-		readStream.pipe(ffprobeProc.stdin);
+			// ffprobe often closes its own stdin once it has read enough of the
+			// header (before the source stream ends), which would otherwise raise
+			// EPIPE/ECONNRESET here — expected, not a failure. Node's pipe()
+			// already unpipes input once ffprobeProc.stdin closes.
+			ffprobeProc.stdin.on("error", () => {});
+			input.pipe(ffprobeProc.stdin);
+		}
 
 		let stdout = "";
 		let stderr = "";
