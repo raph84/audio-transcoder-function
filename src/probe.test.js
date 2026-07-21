@@ -201,4 +201,40 @@ describe("probeAudio", () => {
 
 		await expect(promise).rejects.toBeInstanceOf(TransientError);
 	});
+
+	describe("when input is a local file path", () => {
+		it("passes the path as ffprobe's input instead of pipe:0", async () => {
+			probeAudio("/tmp/some-file.m4a");
+
+			expect(state.lastProc).not.toBeNull();
+			const { spawn } = await import("node:child_process");
+			expect(spawn).toHaveBeenCalledWith(
+				"/mock/ffprobe",
+				["-print_format", "json", "-show_streams", "/tmp/some-file.m4a"],
+				{ windowsHide: true },
+			);
+		});
+
+		it("resolves with codec, sampleRate, and channels", async () => {
+			const promise = probeAudio("/tmp/some-file.m4a");
+
+			emitStdout(oneAudioStream);
+			close(0);
+
+			await expect(promise).resolves.toEqual({
+				codec: "aac",
+				sampleRate: 44100,
+				channels: 2,
+			});
+		});
+
+		it("rejects with a plain (non-transient) error when ffprobe exits with a non-zero code", async () => {
+			const promise = probeAudio("/tmp/some-file.m4a");
+
+			close(1);
+
+			await expect(promise).rejects.toThrow("ffprobe exited with code 1");
+			await expect(promise).rejects.not.toBeInstanceOf(TransientError);
+		});
+	});
 });

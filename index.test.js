@@ -12,6 +12,8 @@ const {
 	mockBucket,
 	mockProbeAudio,
 	mockTranscodeToFlac,
+	mockPrepareInputSource,
+	mockCleanup,
 } = vi.hoisted(() => {
 	const mockCreateReadStream = vi.fn();
 	const mockCreateWriteStream = vi.fn();
@@ -29,6 +31,8 @@ const {
 		mockBucket,
 		mockProbeAudio: vi.fn(),
 		mockTranscodeToFlac: vi.fn(),
+		mockPrepareInputSource: vi.fn(),
+		mockCleanup: vi.fn(),
 	};
 });
 
@@ -46,6 +50,9 @@ vi.mock("@google-cloud/storage", () => ({
 
 vi.mock("./src/probe.js", () => ({ probeAudio: mockProbeAudio }));
 vi.mock("./src/transcode.js", () => ({ transcodeToFlac: mockTranscodeToFlac }));
+vi.mock("./src/inputSource.js", () => ({
+	prepareInputSource: mockPrepareInputSource,
+}));
 
 // Import index.js — triggers the cloudEvent() registration.
 import "./index.js";
@@ -60,6 +67,16 @@ describe("transcodeAudio handler", () => {
 			createWriteStream: mockCreateWriteStream,
 		});
 		mockBucket.mockReturnValue({ file: mockFile });
+		mockCleanup.mockResolvedValue(undefined);
+		// Default: faststart, streaming straight from GCS — openProbeInput/
+		// openTranscodeInput just delegate to the same createReadStream mock
+		// the pre-inputSource tests below were written against.
+		mockPrepareInputSource.mockResolvedValue({
+			fastStart: true,
+			openProbeInput: () => mockCreateReadStream(),
+			openTranscodeInput: () => mockCreateReadStream(),
+			cleanup: mockCleanup,
+		});
 	});
 
 	afterEach(() => {
@@ -139,6 +156,20 @@ describe("transcodeAudio handler", () => {
 		expect(writtenPaths).toContain("transcoded/session.flac");
 	});
 
+	it("does not attempt splitting when PART_LENGTH_SECONDS is unset (default test env)", async () => {
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+		});
+		mockTranscodeToFlac.mockResolvedValue({ duration: 999999 });
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockTranscodeToFlac).toHaveBeenCalledTimes(1);
+		expect(mockCreateWriteStream).toHaveBeenCalledTimes(1);
+	});
+
 	// --- two read streams ---
 
 	it("opens two separate read streams: one for probe, one for transcode", async () => {
@@ -156,7 +187,7 @@ describe("transcodeAudio handler", () => {
 
 	// --- probed audio properties forwarded ---
 
-	it("passes probed audio properties to transcodeToFlac", async () => {
+	it("passes the probed sampleRate to transcodeToFlac for the full transcode", async () => {
 		const audioProps = { codec: "aac", sampleRate: 16000, channels: 1 };
 		mockProbeAudio.mockResolvedValue(audioProps);
 		mockTranscodeToFlac.mockResolvedValue();
@@ -166,7 +197,7 @@ describe("transcodeAudio handler", () => {
 		expect(mockTranscodeToFlac).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.anything(),
-			audioProps,
+			{ sampleRate: 16000 },
 		);
 	});
 
@@ -234,5 +265,92 @@ describe("transcodeAudio handler", () => {
 		).resolves.toBeUndefined();
 
 		expect(mockTranscodeToFlac).not.toHaveBeenCalled();
+	});
+
+	// --- input source preparation (faststart detection / temp-file fallback) ---
+
+	it("cleans up the input source after a successful run", async () => {
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+		});
+		mockTranscodeToFlac.mockResolvedValue({ duration: 10 });
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockCleanup).toHaveBeenCalledOnce();
+	});
+
+	it("cleans up the input source even when probe fails", async () => {
+		mockProbeAudio.mockRejectedValue(new Error("No audio stream found"));
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockCleanup).toHaveBeenCalledOnce();
+	});
+
+	it("cleans up the input source even when a transient probe error rethrows", async () => {
+		mockProbeAudio.mockRejectedValue(
+			new TransientError("source read stream error: ECONNRESET"),
+		);
+
+		await expect(
+			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
+		).rejects.toThrow("ECONNRESET");
+
+		expect(mockCleanup).toHaveBeenCalledOnce();
+	});
+
+	it("logs the non-faststart fallback and uses the local-file inputs it provides", async () => {
+		mockPrepareInputSource.mockResolvedValue({
+			fastStart: false,
+			openProbeInput: () => "/tmp/fake-path.m4a",
+			openTranscodeInput: () => "/tmp/fake-path.m4a",
+			cleanup: mockCleanup,
+		});
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+		});
+		mockTranscodeToFlac.mockResolvedValue({ duration: 10 });
+		const logSpy = vi.spyOn(console, "log");
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockProbeAudio).toHaveBeenCalledWith("/tmp/fake-path.m4a");
+		expect(mockTranscodeToFlac).toHaveBeenCalledWith(
+			"/tmp/fake-path.m4a",
+			expect.anything(),
+			{ sampleRate: 44100 },
+		);
+		expect(
+			logSpy.mock.calls.some(([line]) =>
+				line.includes("non-faststart M4A (or inconclusive check)"),
+			),
+		).toBe(true);
+	});
+
+	it("rethrows a transient prepareInputSource error so Eventarc can retry", async () => {
+		mockPrepareInputSource.mockRejectedValue(
+			new TransientError("source read stream error: ECONNRESET"),
+		);
+
+		await expect(
+			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
+		).rejects.toThrow("ECONNRESET");
+
+		expect(mockProbeAudio).not.toHaveBeenCalled();
+	});
+
+	it("does not rethrow a permanent prepareInputSource error, to avoid retrying forever", async () => {
+		mockPrepareInputSource.mockRejectedValue(new Error("disk full"));
+
+		await expect(
+			reg.handler({ data: { bucket: "b", name: "source/file.m4a" } }),
+		).resolves.toBeUndefined();
+
+		expect(mockProbeAudio).not.toHaveBeenCalled();
 	});
 });

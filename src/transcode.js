@@ -1,6 +1,16 @@
 import { classifyGcsStreamError, TransientError } from "./errors.js";
 import ffmpeg from "./ffmpeg.js";
 
+// Parses ffmpeg progress timemarks ("mm:ss.xx" or "hh:mm:ss.xx") into
+// seconds. Each successive component (hours, then minutes, then seconds) is
+// folded in with `total * 60 + component`, which works regardless of
+// whether the timemark has 2 or 3 colon-separated parts.
+function timemarkToSeconds(timemark) {
+	return timemark
+		.split(":")
+		.reduce((total, part) => total * 60 + Number(part), 0);
+}
+
 /**
  * Transcode a readable M4A stream to FLAC, writing directly to a writable stream.
  *
@@ -21,19 +31,38 @@ import ffmpeg from "./ffmpeg.js";
  * be decoded from a non-seekable stdin pipe. ffmpeg will error with "moov atom
  * not found". Most modern recorders write faststart M4A by default.
  *
+ * When `startTime`/`duration` are given, ffmpeg is additionally passed `-ss`
+ * (input-side seek) and `-t` (output-side cutoff), extracting a single time
+ * range for split-part transcodes while reusing the same decoder/encoder
+ * settings as a full transcode. On the non-seekable GCS pipe input, `-ss`
+ * performs decode-and-discard rather than a fast keyframe seek — fine for
+ * audio, but means an N-part split costs roughly N decode passes.
+ *
+ * The resolved value's `duration` is the source's actual decoded length in
+ * seconds, measured from ffmpeg's own progress reporting (the timemark of
+ * the last "progress" event) rather than from container header metadata —
+ * the latter (as read by ffprobe) is unreliable for some of the files this
+ * function processes. It's `undefined` if no progress event was observed
+ * (e.g. a clip too short to produce one).
+ *
  * @param {import('stream').Readable} inputStream
  * @param {import('stream').Writable} outputStream
- * @param {{ sampleRate: number }} audioProps
- * @returns {Promise<void>}
+ * @param {{ sampleRate: number, startTime?: number, duration?: number }} audioProps
+ * @returns {Promise<{ duration: number | undefined }>}
  */
-export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
+export function transcodeToFlac(
+	inputStream,
+	outputStream,
+	{ sampleRate, startTime, duration },
+) {
 	return new Promise((resolve, reject) => {
 		let settled = false;
+		let measuredDuration;
 		function settle(err) {
 			if (settled) return;
 			settled = true;
 			if (err) reject(err);
-			else resolve();
+			else resolve({ duration: measuredDuration });
 		}
 
 		const command = ffmpeg(inputStream)
@@ -43,8 +72,17 @@ export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
 			.format("flac")
 			.outputOptions(["-compression_level 8"]);
 
+		if (startTime !== undefined) command.seekInput(startTime);
+		if (duration !== undefined) command.duration(duration);
+
 		command.on("start", (cmdLine) => {
 			console.log(JSON.stringify({ msg: "ffmpeg started", cmd: cmdLine }));
+		});
+
+		command.on("progress", (progress) => {
+			if (progress.timemark) {
+				measuredDuration = timemarkToSeconds(progress.timemark);
+			}
 		});
 
 		command.on("error", (err, _stdout, stderr) => {
