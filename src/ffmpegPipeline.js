@@ -5,8 +5,8 @@ import { TransientError } from "./errors.js";
  * promise exactly once when either side finishes or errors.
  *
  * Shared by every module that runs an ffmpeg command and pipes its output
- * somewhere (transcode.js, silence.js, split.js), which all previously
- * re-implemented this same settle-once guard and error-message wrapping.
+ * somewhere (transcode.js, silence.js, split.js), so each doesn't have to
+ * re-implement this same settle-once guard and error-message wrapping.
  *
  * On a command error, `outputStream` is destroyed so a partially-written
  * upload (or other resource) doesn't linger open after the promise rejects.

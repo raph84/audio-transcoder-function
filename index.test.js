@@ -464,4 +464,94 @@ describe("transcodeAudio handler — splitting (SPLIT_AFTER_MINUTES=60)", () => 
 
 		errorSpy.mockRestore();
 	});
+
+	it("destroys each part's read stream after transcodeFlacSegment settles, on both success and failure", async () => {
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+			durationSeconds: 7200,
+		});
+		mockDetectSilence.mockResolvedValue([]);
+		mockComputeSplitPoints.mockReturnValue([
+			{ start: 0, end: 3600 },
+			{ start: 3600, end: 7000 },
+			{ start: 7000, end: null },
+		]);
+		mockTranscodeFlacSegment
+			.mockResolvedValueOnce(undefined)
+			.mockRejectedValueOnce(new Error("upload aborted"))
+			.mockResolvedValueOnce(undefined);
+
+		const readStreams = [];
+		mockCreateReadStream.mockImplementation(() => {
+			const stream = new EventEmitter();
+			stream.destroy = vi.fn();
+			readStreams.push(stream);
+			return stream;
+		});
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		// readStreams[0..1] are probe/main-transcode, [2] is silencedetect,
+		// [3..5] are the three split parts.
+		const partReadStreams = readStreams.slice(3);
+		expect(partReadStreams).toHaveLength(3);
+		for (const stream of partReadStreams) {
+			expect(stream.destroy).toHaveBeenCalledOnce();
+		}
+
+		errorSpy.mockRestore();
+	});
+
+	it("caps concurrent part transcodes at SPLIT_PART_CONCURRENCY", async () => {
+		vi.resetModules();
+		vi.stubEnv("SPLIT_AFTER_MINUTES", "60");
+		vi.stubEnv("SPLIT_PART_CONCURRENCY", "2");
+		vi.clearAllMocks();
+		mockCreateReadStream.mockReturnValue(new EventEmitter());
+		mockCreateWriteStream.mockReturnValue(new EventEmitter());
+		mockFile.mockReturnValue({
+			createReadStream: mockCreateReadStream,
+			createWriteStream: mockCreateWriteStream,
+		});
+		mockBucket.mockReturnValue({ file: mockFile });
+		mockTranscodeToFlac.mockResolvedValue();
+
+		// Re-import so the handler picks up the freshly-stubbed
+		// SPLIT_PART_CONCURRENCY (config.js reads env vars at import time).
+		await import("./index.js");
+
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+			durationSeconds: 7200,
+		});
+		mockDetectSilence.mockResolvedValue([]);
+		mockComputeSplitPoints.mockReturnValue([
+			{ start: 0, end: 1000 },
+			{ start: 1000, end: 2000 },
+			{ start: 2000, end: 3000 },
+			{ start: 3000, end: 4000 },
+			{ start: 4000, end: null },
+		]);
+
+		let active = 0;
+		let maxActive = 0;
+		mockTranscodeFlacSegment.mockImplementation(async () => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await Promise.resolve();
+			await Promise.resolve();
+			active--;
+		});
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockTranscodeFlacSegment).toHaveBeenCalledTimes(5);
+		expect(maxActive).toBe(2);
+	});
 });

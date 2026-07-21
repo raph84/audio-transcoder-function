@@ -1,6 +1,7 @@
 import path from "node:path";
 import { cloudEvent } from "@google-cloud/functions-framework";
 import { Storage } from "@google-cloud/storage";
+import { mapWithConcurrency } from "./src/concurrency.js";
 import {
 	OUTPUT_BUCKET,
 	OUTPUT_FORMAT,
@@ -10,6 +11,7 @@ import {
 	SILENCE_NOISE_DB,
 	SOURCE_PREFIX,
 	SPLIT_AFTER_MINUTES,
+	SPLIT_PART_CONCURRENCY,
 } from "./src/config.js";
 import { isTransientError } from "./src/errors.js";
 import { probeAudio } from "./src/probe.js";
@@ -193,14 +195,17 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 		);
 
 		// Parts are independent: each opens its own fresh read of the source
-		// object and writes to its own output object, so they run concurrently
-		// rather than paying the sum of every part's ffmpeg run in sequence.
-		// Each re-decodes the source from byte 0 up through its own cut point
-		// (see split.js for why: ffmpeg's own HTTPS input segfaults in this
-		// environment, and `-ss` on a non-seekable input only seeks correctly
-		// while actually decoding, not under `-c copy`).
-		await Promise.all(
-			segments.map((segment, i) => {
+		// object and writes to its own output object. Each is a CPU-bound
+		// ffmpeg decode of the source from byte 0 through its own cut point
+		// (see split.js for why). Concurrency is capped at
+		// SPLIT_PART_CONCURRENCY rather than left unbounded, so a recording
+		// with many split points doesn't spin up an unbounded number of
+		// simultaneous full-source decodes in one invocation; every part is
+		// still attempted even if another one fails (see mapWithConcurrency).
+		const partResults = await mapWithConcurrency(
+			segments,
+			SPLIT_PART_CONCURRENCY,
+			async (segment, i) => {
 				const partName = `${OUTPUT_PREFIX}${stem}.part${String(i + 1).padStart(3, "0")}.${OUTPUT_FORMAT}`;
 				const partReadStream = sourceFile.createReadStream();
 				const partWriteStream = storage
@@ -220,14 +225,21 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 					}),
 				);
 
-				return transcodeFlacSegment(
-					partReadStream,
-					partWriteStream,
-					segment,
-					audioProps,
-				);
-			}),
+				try {
+					await transcodeFlacSegment(
+						partReadStream,
+						partWriteStream,
+						segment,
+						audioProps,
+					);
+				} finally {
+					partReadStream.destroy?.();
+				}
+			},
 		);
+
+		const firstPartFailure = partResults.find((r) => r.status === "rejected");
+		if (firstPartFailure) throw firstPartFailure.reason;
 
 		console.log(
 			JSON.stringify({

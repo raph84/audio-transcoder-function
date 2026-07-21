@@ -28,6 +28,14 @@ function requirePositiveFinite(name, value) {
 	}
 }
 
+function requirePositiveInteger(name, value) {
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new Error(
+			`${name} must be a positive integer, got: "${process.env[name]}"`,
+		);
+	}
+}
+
 // Splitting is opt-in: unset means null, which disables the whole feature
 // and leaves behavior identical to before it existed.
 export const SPLIT_AFTER_MINUTES = numberEnv("SPLIT_AFTER_MINUTES", null);
@@ -58,6 +66,11 @@ export const SILENCE_LOOKBACK_MAX_SECONDS = numberEnv(
 	lookbackDefaultSeconds,
 );
 
+// Each split part is a full ffmpeg decode of the source (CPU-bound), so how
+// many run at once is capped rather than left unbounded - see
+// index.js/src/concurrency.js.
+export const SPLIT_PART_CONCURRENCY = numberEnv("SPLIT_PART_CONCURRENCY", 4);
+
 if (!SUPPORTED_OUTPUT_FORMATS.includes(OUTPUT_FORMAT)) {
 	throw new Error(
 		`Unsupported OUTPUT_FORMAT: "${OUTPUT_FORMAT}". Supported: ${SUPPORTED_OUTPUT_FORMATS.join(", ")}`,
@@ -77,3 +90,4 @@ requirePositiveFinite(
 	"SILENCE_LOOKBACK_MAX_SECONDS",
 	SILENCE_LOOKBACK_MAX_SECONDS,
 );
+requirePositiveInteger("SPLIT_PART_CONCURRENCY", SPLIT_PART_CONCURRENCY);

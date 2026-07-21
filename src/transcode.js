@@ -1,5 +1,5 @@
 import { classifyGcsStreamError } from "./errors.js";
-import ffmpeg from "./ffmpeg.js";
+import { buildFlacCommand } from "./ffmpeg.js";
 import { runFfmpegPipeline } from "./ffmpegPipeline.js";
 
 /**
@@ -11,7 +11,8 @@ import { runFfmpegPipeline } from "./ffmpegPipeline.js";
  * The Promise resolves only after outputStream emits "finish", meaning the GCS
  * HTTP upload has fully completed — not just when ffmpeg exits.
  *
- * Audio settings follow GCP Speech-to-Text best practices:
+ * Audio settings (built by `buildFlacCommand` in ffmpeg.js, shared with
+ * split.js) follow GCP Speech-to-Text best practices:
  *   - Mono output: the Speech API ignores the second stereo channel; mixing
  *     down beforehand avoids wasted bandwidth and potential accuracy loss.
  *   - Preserved sample rate: never upsample — passing the probed rate prevents
@@ -28,12 +29,7 @@ import { runFfmpegPipeline } from "./ffmpegPipeline.js";
  * @returns {Promise<void>}
  */
 export function transcodeToFlac(inputStream, outputStream, { sampleRate }) {
-	const command = ffmpeg(inputStream)
-		.audioCodec("flac")
-		.audioChannels(1)
-		.audioFrequency(sampleRate)
-		.format("flac")
-		.outputOptions(["-compression_level 8"]);
+	const command = buildFlacCommand(inputStream, sampleRate);
 
 	command.on("start", (cmdLine) => {
 		console.log(JSON.stringify({ msg: "ffmpeg started", cmd: cmdLine }));

@@ -185,4 +185,35 @@ describe("config", () => {
 			"SILENCE_LOOKBACK_MAX_SECONDS must be a positive finite number",
 		);
 	});
+
+	// --- SPLIT_PART_CONCURRENCY ---
+
+	it("exports default SPLIT_PART_CONCURRENCY of 4", async () => {
+		const { SPLIT_PART_CONCURRENCY } = await import("./config.js");
+		expect(SPLIT_PART_CONCURRENCY).toBe(4);
+	});
+
+	it("reads SPLIT_PART_CONCURRENCY from env", async () => {
+		vi.stubEnv("SPLIT_PART_CONCURRENCY", "2");
+		const { SPLIT_PART_CONCURRENCY } = await import("./config.js");
+		expect(SPLIT_PART_CONCURRENCY).toBe(2);
+	});
+
+	it("treats empty-string SPLIT_PART_CONCURRENCY as unset (uses default 4)", async () => {
+		vi.stubEnv("SPLIT_PART_CONCURRENCY", "");
+		const { SPLIT_PART_CONCURRENCY } = await import("./config.js");
+		expect(SPLIT_PART_CONCURRENCY).toBe(4);
+	});
+
+	it.each([
+		"abc",
+		"0",
+		"-1",
+		"1.5",
+	])("throws at load time for an invalid SPLIT_PART_CONCURRENCY value %s", async (value) => {
+		vi.stubEnv("SPLIT_PART_CONCURRENCY", value);
+		await expect(import("./config.js")).rejects.toThrow(
+			"SPLIT_PART_CONCURRENCY must be a positive integer",
+		);
+	});
 });
