@@ -30,7 +30,9 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
   and decides which errors to rethrow (for Eventarc retry) vs. swallow,
   based on `isTransientError`.
 - `src/config.js` — reads and validates environment variables at import
-  time. Throws immediately on an unsupported `OUTPUT_FORMAT`.
+  time. Throws immediately on an unsupported `OUTPUT_FORMAT`, an invalid
+  `PART_LENGTH_SECONDS`/`PART_OVERLAP_SECONDS`, or a `PART_OVERLAP_SECONDS`
+  that isn't strictly less than `PART_LENGTH_SECONDS`.
 - `src/errors.js` — defines `TransientError` / `isTransientError`, the
   mechanism used to classify errors as retryable vs. permanent, plus
   `classifyGcsStreamError` for GCS read/write stream failures specifically
@@ -45,9 +47,20 @@ Always run `pnpm check` and `pnpm test` before considering a change done.
   `ffprobe()` helper so it holds the process handle — see Gotchas.
 - `src/transcode.js` — streams the source file through `ffmpeg` into a
   writable stream, producing mono FLAC at the original sample rate.
+  Optionally accepts `startTime`/`duration` to extract a single time range
+  (`-ss`/`-t`), used for split-part transcodes. Resolves with `{ duration }`,
+  the source's decoded length in seconds measured from ffmpeg's own
+  "progress" events — not container metadata — which `index.js` uses to
+  decide whether/how to split. See Gotchas.
+- `src/parts.js` — pure function (`computeParts`), no I/O: given a total
+  duration, part length, and overlap, returns the sliding-window
+  `{start, duration}` segments to transcode.
 
 Each `src/*.js` module has a co-located `*.test.js`; `index.test.js` covers
-the entry point.
+the entry point's default (no-splitting) behavior, and `index.parts.test.js`
+covers splitting specifically (it needs `PART_LENGTH_SECONDS` set before
+`index.js`/`src/config.js` are first imported, so it can't share a module
+graph with `index.test.js`).
 
 ## Conventions
 
@@ -101,3 +114,19 @@ the entry point.
   forever rather than exiting. Spawning directly lets `src/probe.js` call
   `.kill()` on that exact failure path. If you touch `src/probe.js`, keep
   that process handle reachable from the stream-error handler.
+- fluent-ffmpeg's `.seekInput()` (`-ss`, input-side) on the non-seekable GCS
+  pipe used for the transcode input performs decode-and-discard up to the
+  seek point rather than a fast keyframe seek — fine for audio, but means
+  splitting a file into N parts costs roughly N decode passes, not 1. Not a
+  bug to fix (there's no seekable alternative for a streamed pipe input);
+  just a cost characteristic to weigh against `PART_LENGTH_SECONDS` and the
+  function timeout.
+- `src/probe.js` deliberately does not report duration, and `index.js` does
+  not use ffprobe/container metadata to decide whether to split. That
+  metadata (`format.duration` or a stream's own `duration` field) has proven
+  unreliable for some source files. Instead, `src/transcode.js` tracks the
+  timemark of ffmpeg's own `"progress"` events during the full transcode and
+  resolves with the measured `duration`; `index.js` only computes/attempts
+  parts after that full transcode has succeeded, using this measured value.
+  If you're tempted to reintroduce a probed/header-based duration for
+  splitting, don't — that's the exact unreliability this design avoids.

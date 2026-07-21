@@ -24,6 +24,25 @@ The function is triggered by a Cloud Storage `object.finalized` event
 4. **Write.** The FLAC output is uploaded to
    `OUTPUT_PREFIX + <relative path of source, without extension> + .flac`, in
    `OUTPUT_BUCKET` if set, otherwise back in the source bucket.
+5. **Split (optional).** If `PART_LENGTH_SECONDS` is set and the source's
+   duration — measured from step 3's actual decode progress, not probed
+   container metadata (see below) — exceeds it, the source is additionally
+   re-transcoded into overlapping parts: one full ffmpeg pass per part, from
+   a fresh read of the source, never a slice of the full FLAC produced in
+   step 4. Parts start at `0, (PART_LENGTH_SECONDS - PART_OVERLAP_SECONDS),
+   2 * (PART_LENGTH_SECONDS - PART_OVERLAP_SECONDS), ...`; each is
+   `PART_LENGTH_SECONDS` long except the last, which is clipped to the
+   source's actual duration. Parts are named
+   `OUTPUT_PREFIX + <stem> + .partNNN.flac` (zero-padded, 1-based) alongside
+   the full output. The full, unsplit output is always produced regardless
+   of whether `PART_LENGTH_SECONDS` is set or splitting fails.
+
+Duration for splitting decisions is deliberately *not* read from `ffprobe`
+(step 2) or any other container header metadata — that's proven unreliable
+for some of the files this function processes. Instead it's measured from
+`ffmpeg`'s own progress reporting while producing the full transcode in step
+3, reflecting the audio actually decoded. This is also why splitting always
+runs after, and depends on, a successful full transcode.
 
 Everything is streamed end-to-end (GCS → ffprobe/ffmpeg → GCS) — the function
 never buffers a full file in memory or on local disk.
@@ -51,17 +70,25 @@ file that will never succeed isn't retried forever.
 See `src/errors.js` (`TransientError` / `isTransientError`) for the
 classification mechanism.
 
+Split-part failures (step 5 above) are an exception to this: they are always
+logged and swallowed, transient or not, and processing stops before
+attempting further parts. By the time a part runs, the full transcode has
+already succeeded and is the important artifact — retrying the whole event
+just to redo one part isn't worth it.
+
 ### Configuration
 
 Runtime behavior is controlled by environment variables, read in
 `src/config.js`:
 
-| Variable        | Default        | Description                                          |
-| ---------------- | -------------- | ----------------------------------------------------- |
-| `SOURCE_PREFIX`  | `source/`      | Object path prefix that triggers transcoding          |
-| `OUTPUT_PREFIX`  | `transcoded/`  | Object path prefix for the transcoded output          |
-| `OUTPUT_FORMAT`  | `flac`         | Output format (currently only `flac` is supported)    |
-| `OUTPUT_BUCKET`  | source bucket  | Destination bucket, if different from the source      |
+| Variable               | Default            | Description                                                     |
+| ---------------------- | ------------------ | ----------------------------------------------------------------- |
+| `SOURCE_PREFIX`        | `source/`          | Object path prefix that triggers transcoding                    |
+| `OUTPUT_PREFIX`        | `transcoded/`      | Object path prefix for the transcoded output                    |
+| `OUTPUT_FORMAT`        | `flac`             | Output format (currently only `flac` is supported)               |
+| `OUTPUT_BUCKET`        | source bucket      | Destination bucket, if different from the source                |
+| `PART_LENGTH_SECONDS`  | unset (no splitting) | Max length in seconds of each split part; unset disables splitting |
+| `PART_OVERLAP_SECONDS` | `0`                | Overlap in seconds between consecutive parts; must be less than `PART_LENGTH_SECONDS` |
 
 See `.env.example` for the full set of variables, including deployment-time
 settings (project, region, trigger bucket, memory, timeout).

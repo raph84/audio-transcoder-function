@@ -11,6 +11,8 @@ const state = vi.hoisted(() => ({
 	audioFrequencyArg: null,
 	formatArg: null,
 	outputOptionsArg: null,
+	seekInputArg: null,
+	durationArg: null,
 	pipeStream: null,
 	pipeOpts: null,
 }));
@@ -36,6 +38,14 @@ vi.mock("fluent-ffmpeg", () => {
 		};
 		cmd.outputOptions = (v) => {
 			state.outputOptionsArg = v;
+			return cmd;
+		};
+		cmd.seekInput = (v) => {
+			state.seekInputArg = v;
+			return cmd;
+		};
+		cmd.duration = (v) => {
+			state.durationArg = v;
 			return cmd;
 		};
 		cmd.on = (event, handler) => {
@@ -82,6 +92,8 @@ describe("transcodeToFlac", () => {
 			audioFrequencyArg: null,
 			formatArg: null,
 			outputOptionsArg: null,
+			seekInputArg: null,
+			durationArg: null,
 			pipeStream: null,
 			pipeOpts: null,
 		});
@@ -122,6 +134,39 @@ describe("transcodeToFlac", () => {
 		expect(state.outputOptionsArg).toContain("-compression_level 8");
 	});
 
+	it("does not call seekInput or duration when startTime/duration are not provided", () => {
+		transcodeToFlac(makeInputStream(), makeOutputStream(), {
+			sampleRate: 44100,
+		});
+		expect(state.seekInputArg).toBeNull();
+		expect(state.durationArg).toBeNull();
+	});
+
+	it("calls seekInput with the given startTime", () => {
+		transcodeToFlac(makeInputStream(), makeOutputStream(), {
+			sampleRate: 44100,
+			startTime: 105,
+		});
+		expect(state.seekInputArg).toBe(105);
+	});
+
+	it("supports startTime of 0", () => {
+		transcodeToFlac(makeInputStream(), makeOutputStream(), {
+			sampleRate: 44100,
+			startTime: 0,
+		});
+		expect(state.seekInputArg).toBe(0);
+	});
+
+	it("calls duration (output -t) with the given duration", () => {
+		transcodeToFlac(makeInputStream(), makeOutputStream(), {
+			sampleRate: 44100,
+			startTime: 0,
+			duration: 120,
+		});
+		expect(state.durationArg).toBe(120);
+	});
+
 	it("pipes to the output stream with { end: true }", () => {
 		const out = makeOutputStream();
 		transcodeToFlac(makeInputStream(), out, { sampleRate: 44100 });
@@ -129,7 +174,7 @@ describe("transcodeToFlac", () => {
 		expect(state.pipeOpts).toEqual({ end: true });
 	});
 
-	it("resolves when the output stream emits finish", async () => {
+	it("resolves with duration: undefined when no progress event was observed", async () => {
 		const out = makeOutputStream();
 		const promise = transcodeToFlac(makeInputStream(), out, {
 			sampleRate: 44100,
@@ -137,7 +182,32 @@ describe("transcodeToFlac", () => {
 
 		out.emit("finish");
 
-		await expect(promise).resolves.toBeUndefined();
+		await expect(promise).resolves.toEqual({ duration: undefined });
+	});
+
+	it("resolves with the duration measured from the last ffmpeg progress timemark", async () => {
+		const out = makeOutputStream();
+		const promise = transcodeToFlac(makeInputStream(), out, {
+			sampleRate: 44100,
+		});
+
+		state.handlers.progress({ timemark: "00:01:05.50" });
+		state.handlers.progress({ timemark: "00:02:10.25" });
+		out.emit("finish");
+
+		await expect(promise).resolves.toEqual({ duration: 130.25 });
+	});
+
+	it("parses an mm:ss timemark without an hours component", async () => {
+		const out = makeOutputStream();
+		const promise = transcodeToFlac(makeInputStream(), out, {
+			sampleRate: 44100,
+		});
+
+		state.handlers.progress({ timemark: "01:30.00" });
+		out.emit("finish");
+
+		await expect(promise).resolves.toEqual({ duration: 90 });
 	});
 
 	it("rejects when the ffmpeg command emits an error", async () => {

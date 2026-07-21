@@ -139,6 +139,20 @@ describe("transcodeAudio handler", () => {
 		expect(writtenPaths).toContain("transcoded/session.flac");
 	});
 
+	it("does not attempt splitting when PART_LENGTH_SECONDS is unset (default test env)", async () => {
+		mockProbeAudio.mockResolvedValue({
+			codec: "aac",
+			sampleRate: 44100,
+			channels: 2,
+		});
+		mockTranscodeToFlac.mockResolvedValue({ duration: 999999 });
+
+		await reg.handler({ data: { bucket: "b", name: "source/file.m4a" } });
+
+		expect(mockTranscodeToFlac).toHaveBeenCalledTimes(1);
+		expect(mockCreateWriteStream).toHaveBeenCalledTimes(1);
+	});
+
 	// --- two read streams ---
 
 	it("opens two separate read streams: one for probe, one for transcode", async () => {
@@ -156,7 +170,7 @@ describe("transcodeAudio handler", () => {
 
 	// --- probed audio properties forwarded ---
 
-	it("passes probed audio properties to transcodeToFlac", async () => {
+	it("passes the probed sampleRate to transcodeToFlac for the full transcode", async () => {
 		const audioProps = { codec: "aac", sampleRate: 16000, channels: 1 };
 		mockProbeAudio.mockResolvedValue(audioProps);
 		mockTranscodeToFlac.mockResolvedValue();
@@ -166,7 +180,7 @@ describe("transcodeAudio handler", () => {
 		expect(mockTranscodeToFlac).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.anything(),
-			audioProps,
+			{ sampleRate: 16000 },
 		);
 	});
 

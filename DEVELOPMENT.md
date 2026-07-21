@@ -66,8 +66,9 @@ on staged files automatically.
 index.js            Cloud Function entry point (transcodeAudio)
 src/config.js        Environment-variable configuration, validated at import time
 src/ffmpeg.js         fluent-ffmpeg instance wired to the static ffmpeg/ffprobe binaries
-src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels
+src/probe.js          Streams a source file through ffprobe to detect codec/rate/channels/duration
 src/transcode.js      Streams a source file through ffmpeg into a FLAC output stream
+src/parts.js          Pure segment math (computeParts) for splitting into overlapping parts
 ```
 
 ## Deploying
@@ -90,7 +91,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --memory="$MEMORY" \
   --timeout="$TIMEOUT" \
   --service-account="$SERVICE_ACCOUNT" \
-  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )"
+  --set-env-vars="SOURCE_PREFIX=$SOURCE_PREFIX,OUTPUT_PREFIX=$OUTPUT_PREFIX,OUTPUT_FORMAT=$OUTPUT_FORMAT$( [ -n "$OUTPUT_BUCKET" ] && echo ",OUTPUT_BUCKET=$OUTPUT_BUCKET" )$( [ -n "$PART_LENGTH_SECONDS" ] && echo ",PART_LENGTH_SECONDS=$PART_LENGTH_SECONDS" )$( [ -n "$PART_OVERLAP_SECONDS" ] && echo ",PART_OVERLAP_SECONDS=$PART_OVERLAP_SECONDS" )"
 ```
 
 The runtime service account needs read access to the trigger bucket and

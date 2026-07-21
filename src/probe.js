@@ -15,6 +15,13 @@ import { TransientError } from "./errors.js";
  * cannot seek backward in a non-seekable pipe. Most modern recorders (iOS,
  * Android) write faststart M4A by default.
  *
+ * Deliberately does NOT report duration: container header duration metadata
+ * (whether read via ffprobe here or via ffmpeg's own input parsing) has
+ * proven unreliable for some of the files this function processes. Callers
+ * that need duration should measure it from the actual transcode instead
+ * (see `transcodeToFlac`'s resolved `duration`, tracked from real decode
+ * progress).
+ *
  * We spawn ffprobe directly (rather than using fluent-ffmpeg's ffprobe()
  * helper) so this function holds the process handle. fluent-ffmpeg's static
  * ffprobe() helper spawns internally and never exposes the child process, so
