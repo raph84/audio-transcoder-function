@@ -79,6 +79,17 @@ graph with `index.test.js`).
 - Streaming is a core design constraint: the function never downloads a
   full file to disk or buffers it fully in memory. New code touching
   `index.js`, `src/probe.js`, or `src/transcode.js` should preserve this.
+- Every GCS read stream you create must be explicitly `.destroy()`ed once
+  you're done with it, in a `finally` block. `pipe()` only ends the
+  destination when the *source* ends/errors — it never destroys the source
+  when the *destination* stops reading first (an early process exit, a
+  consumer error, or an output-side cutoff like ffmpeg's `-t`). Without an
+  explicit destroy, that GCS read stream dangles, and since a Cloud
+  Functions container can be reused across invocations, the leak persists
+  past the current invocation. This isn't hypothetical: it's caused two
+  separate bugs already — see the Gotchas below for `probeReadStream` and
+  `partReadStream`. Any new code that opens a read stream and pipes it into
+  something that might stop consuming before EOF needs the same guard.
 - Error classification lives in `src/errors.js`: only errors wrapped in
   `TransientError` (currently: GCS read/write stream failures — network
   hiccups, not the audio content itself) are rethrown from the
@@ -113,7 +124,20 @@ graph with `index.test.js`).
   source `'error'`, so the orphaned ffprobe process would block on stdin
   forever rather than exiting. Spawning directly lets `src/probe.js` call
   `.kill()` on that exact failure path. If you touch `src/probe.js`, keep
-  that process handle reachable from the stream-error handler.
+  that process handle reachable from the stream-error handler. `index.js`
+  also destroys `probeReadStream` itself in a `finally` block, since
+  ffprobe often closes its own stdin once it has read enough of the header,
+  well before the source stream ends — see the streaming-cleanup
+  convention above.
+- Split-part transcodes hit the same dangling-stream hazard as the probe
+  case above, from a different trigger: `-t` (output-side cutoff, see the
+  `.seekInput()` gotcha below) makes ffmpeg stop reading stdin once it
+  reaches the part's cutoff, which for every non-final part is before the
+  GCS read stream reaches EOF on its own. `index.js` destroys each
+  `partReadStream` in a `finally` block for exactly this reason. This one
+  fires on the normal success path (not just on error, unlike the probe
+  case), so it's easy to miss in testing if mocks don't simulate an
+  early-closing consumer.
 - fluent-ffmpeg's `.seekInput()` (`-ss`, input-side) on the non-seekable GCS
   pipe used for the transcode input performs decode-and-discard up to the
   seek point rather than a fast keyframe seek — fine for audio, but means

@@ -221,6 +221,13 @@ cloudEvent("transcodeAudio", async (cloudevent) => {
 				partNumber,
 			});
 			break;
+		} finally {
+			// -t (duration) makes ffmpeg stop reading stdin once it reaches the
+			// part's cutoff, which for every non-final part is before this GCS
+			// read stream reaches EOF on its own. pipe() doesn't destroy the
+			// source when the destination stops reading, so it must be done
+			// explicitly here (mirrors probeReadStream above) or it leaks.
+			partReadStream.destroy?.();
 		}
 
 		console.log(
