@@ -32,7 +32,7 @@
 		"@biomejs/biome": "2.5.1",
 		"husky": "^9.1.7",
 		"lint-staged": "^17.0.8",
-		"vitest": "^4.1.9"
+		"vitest": "^5.0.5"
 	},
 	"dependencies": {
 		"@ffprobe-installer/ffprobe": "^2.1.2",
